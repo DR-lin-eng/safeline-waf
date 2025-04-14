@@ -149,7 +149,7 @@ clone_source() {
         info "检测到本地源码，跳过下载"
     else
         # 这里使用GitHub仓库，实际部署时替换为您的仓库
-        git clone https://github.com/yourusername/safeline-waf.git .
+        git clone https://github.com/DR-lin-eng/safeline-waf.git .
         
         if [ $? -ne 0 ]; then
             warn "Git克隆失败，尝试使用备用方法下载..."
