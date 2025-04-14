@@ -1,0 +1,38 @@
+{
+  "domain": "example.com",
+  "backend_server": "http://backend:8080",
+  "enabled": true,
+  "protection": {
+    "browser_detection_enabled": true,
+    "environment_detection_enabled": true,
+    "ip_blacklist_enabled": true,
+    "global_rate_limit_enabled": true,
+    "global_rate_limit_count": 60,
+    "global_rate_limit_window": 60,
+    "ddos_protection_enabled": true,
+    "random_attack_protection_enabled": true,
+    "anti_cc_enabled": true,
+    "automation_detection_enabled": true,
+    "traffic_analysis_enabled": true,
+    "request_sampling_enabled": true,
+    "sampling_rate": 0.01,
+    "anomaly_threshold": 5.0,
+    "js_encryption_enabled": true,
+    "prevent_browser_f12": true,
+    "honeypot_enabled": true,
+    "auto_blacklist_enabled": true,
+    "request_logging_enabled": true
+  },
+  "verification_methods": {
+    "captcha_enabled": true,
+    "slider_captcha_enabled": true,
+    "pow_enabled": true,
+    "pow_base_difficulty": 4,
+    "pow_max_difficulty": 8,
+    "verification_methods": {
+      "ip_address": true,
+      "user_agent": true,
+      "cookie": true
+    }
+  }
+}
