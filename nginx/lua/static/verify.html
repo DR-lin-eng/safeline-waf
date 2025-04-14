@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>验证您的浏览器</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        p {
+            color: #666;
+            margin-bottom: 25px;
+            line-height: 1.5;
+        }
+        .logo {
+            margin-bottom: 20px;
+        }
+        .verification-area {
+            margin: 30px 0;
+        }
+        .captcha-container {
+            margin: 20px auto;
+            max-width: 300px;
+        }
+        .captcha-input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            width: 100%;
+            margin-top: 10px;
+            font-size: 16px;
+        }
+        .slider-container {
+            margin: 20px auto;
+            max-width: 300px;
+            height: 40px;
+            background-color: #f0f0f0;
+            position: relative;
+            border-radius: 20px;
+            overflow: hidden;
+        }
+        .slider-track {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-color: #f0f0f0;
+        }
+        .slider-button {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background-color: #4CAF50;
+            border-radius: 50%;
+            cursor: pointer;
+            z-index: 10;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-weight: bold;
+        }
+        .button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 2s linear infinite;
+            margin: 0 auto;
+        }
+        .result-message {
+            margin-top: 20px;
+            font-weight: bold;
+        }
+        .error {
+            color: #ff0000;
+        }
+        .success {
+            color: #4CAF50;
+        }
+        .pow-container {
+            margin: 20px auto;
+            max-width: 300px;
+        }
+        #pow-status {
+            font-size: 14px;
+            margin: 10px 0;
+            color: #666;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>人机安全验证</h1>
+        <p>站点需要验证您不是自动程序。请完成以下验证以继续访问。</p>
+        
+        <div id="verification-area" class="verification-area">
+            <!-- 由JS动态填充 -->
+        </div>
+        
+        <div id="loading" class="loading">
+            <div class="loader"></div>
+            <p id="loading-text">处理中...</p>
+        </div>
+        
+        <div id="result-message" class="result-message"></div>
+    </div>
+
+    <!-- SHA-256库 -->
+    <script>
+        // Compact SHA-256 implementation for POW
+        (function(sha256){
+            var K = [
+                0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+                0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+                0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+                0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+                0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+                0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+                0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+                0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+            ];
+
+            function rotr(n, x) { return (x >>> n) | (x << (32 - n)); }
+            function ch(x, y, z) { return (x & y) ^ (~x & z); }
+            function maj(x, y, z) { return (x & y) ^ (x & z) ^ (y & z); }
+            function sigma0(x) { return rotr(2, x) ^ rotr(13, x) ^ rotr(22, x); }
+            function sigma1(x) { return rotr(6, x) ^ rotr(11, x) ^ rotr(25, x); }
+            function gamma0(x) { return rotr(7, x) ^ rotr(18, x) ^ (x >>> 3); }
+            function gamma1(x) { return rotr(17, x) ^ rotr(19, x) ^ (x >>> 10); }
+
+            function core(m, l) {
+                var a, b, c, d, e, f, g, h, i, j, t1, t2, w = new Array(64);
+                var h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+                var h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+
+                for (i = 0; i < 16; i++) w[i] = m[i];
+                for (i = 16; i < 64; i++) w[i] = (gamma1(w[i - 2]) + w[i - 7] + gamma0(w[i - 15]) + w[i - 16]) | 0;
+
+                a = h0; b = h1; c = h2; d = h3; e = h4; f = h5; g = h6; h = h7;
+
+                for (i = 0; i < 64; i++) {
+                    t1 = h + sigma1(e) + ch(e, f, g) + K[i] + w[i];
+                    t2 = sigma0(a) + maj(a, b, c);
+                    h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+                }
+
+                h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0;
+                h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + h) | 0;
+
+                return [h0, h1, h2, h3, h4, h5, h6, h7];
+            }
+
+            function binb2hex(binarray) {
+                var hex_tab = '0123456789abcdef';
+                var str = '';
+                for (var i = 0; i < binarray.length * 4; i++) {
+                    str += hex_tab.charAt((binarray[i >> 2] >> ((3 - i % 4) * 8 + 4)) & 0xF) +
+                           hex_tab.charAt((binarray[i >> 2] >> ((3 - i % 4) * 8)) & 0xF);
+                }
+                return str;
+            }
+
+            sha256.hash = function(msg) {
+                msg += String.fromCharCode(0x80);
+                var l = msg.length / 4 + 2;
+                var N = Math.ceil(l / 16);
+                var M = new Array(N);
+
+                for (var i = 0; i < N; i++) {
+                    M[i] = new Array(16);
+                    for (var j = 0; j < 16; j++) {
+                        M[i][j] = (msg.charCodeAt(i * 64 + j * 4) << 24) | (msg.charCodeAt(i * 64 + j * 4 + 1) << 16) |
+                                 (msg.charCodeAt(i * 64 + j * 4 + 2) << 8) | (msg.charCodeAt(i * 64 + j * 4 + 3));
+                    }
+                }
+
+                M[N - 1][14] = ((msg.length - 1) * 8) / Math.pow(2, 32);
+                M[N - 1][14] = Math.floor(M[N - 1][14]);
+                M[N - 1][15] = ((msg.length - 1) * 8) & 0xffffffff;
+
+                var H = core(M[0], msg.length * 8);
+                for (var i = 1; i < N; i++) {
+                    H = core(M[i], msg.length * 8, H);
+                }
+
+                return binb2hex(H);
+            };
+        })(window.sha256 = window.sha256 || {});
+    </script>
+
+    <script>
+        // 获取URL参数
+        function getUrlParameter(name) {
+            name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
+            var regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
+            var results = regex.exec(location.search);
+            return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+        }
+        
+        // 解析验证Token
+        var token = getUrlParameter('token');
+        if (!token) {
+            document.getElementById('result-message').innerHTML = '<span class="error">无效的验证请求。</span>';
+            document.getElementById('verification-area').innerHTML = '<p>请返回首页重试。</p>';
+        } else {
+            // 尝试解析token数据
+            try {
+                // 在实际实现中，此部分将由服务器处理
+                // 这里仅作为一个模拟示例
+                var tokenData = JSON.parse(atob(token.replace(/-/g, '+').replace(/_/g, '/')));
+                initVerification(tokenData);
+            } catch (e) {
+                document.getElementById('result-message').innerHTML = '<span class="error">验证token无效。</span>';
+                document.getElementById('verification-area').innerHTML = '<p>请返回首页重试。</p>';
+            }
+        }
+        
+        // 初始化验证界面
+        function initVerification(tokenData) {
+            var verificationType = tokenData.verification_type || 'captcha';
+            var verificationArea = document.getElementById('verification-area');
+            
+            switch (verificationType) {
+                case 'captcha':
+                    initCaptchaVerification(tokenData);
+                    break;
+                case 'slider':
+                    initSliderVerification(tokenData);
+                    break;
+                case 'pow':
+                    initPowVerification(tokenData);
+                    break;
+                default:
+                    initCaptchaVerification(tokenData);
+            }
+        }
+        
+        // 初始化验证码验证
+        function initCaptchaVerification(tokenData) {
+            var verificationArea = document.getElementById('verification-area');
+            verificationArea.innerHTML = `
+                <div class="captcha-container">
+                    <p>请输入验证码</p>
+                    <img id="captcha-image" src="/safeline-api/captcha/image" alt="验证码">
+                    <input type="text" id="captcha-input" class="captcha-input" placeholder="请输入上方验证码">
+                    <button id="verify-button" class="button">验证</button>
+                </div>
+            `;
+            
+            document.getElementById('verify-button').addEventListener('click', function() {
+                var captchaCode = document.getElementById('captcha-input').value;
+                if (!captchaCode) {
+                    document.getElementById('result-message').innerHTML = '<span class="error">请输入验证码</span>';
+                    return;
+                }
+                
+                submitVerification('captcha', {
+                    code: captchaCode,
+                    token: token
+                });
+            });
+        }
+        
+        // 初始化滑块验证
+        function initSliderVerification(tokenData) {
+            var verificationArea = document.getElementById('verification-area');
+            verificationArea.innerHTML = `
+                <div class="slider-container">
+                    <div class="slider-track">
+                        <div class="slider-button">→</div>
+                    </div>
+                </div>
+                <p>请将滑块拖动到右侧</p>
+            `;
+            
+            // 获取滑块位置
+            fetch('/safeline-api/slider/generate')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        initSlider(data.position);
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('result-message').innerHTML = '<span class="error">无法加载滑块验证</span>';
+                });
+                
+            function initSlider(targetPosition) {
+                var sliderButton = document.querySelector('.slider-button');
+                var sliderTrack = document.querySelector('.slider-track');
+                var isDragging = false;
+                var startX = 0;
+                var buttonLeft = 0;
+                
+                sliderButton.addEventListener('mousedown', startDrag);
+                sliderButton.addEventListener('touchstart', startDrag);
+                
+                function startDrag(e) {
+                    isDragging = true;
+                    startX = e.type === 'mousedown' ? e.clientX : e.touches[0].clientX;
+                    buttonLeft = sliderButton.offsetLeft;
+                    
+                    document.addEventListener('mousemove', drag);
+                    document.addEventListener('touchmove', drag);
+                    document.addEventListener('mouseup', endDrag);
+                    document.addEventListener('touchend', endDrag);
+                    
+                    e.preventDefault();
+                }
+                
+                function drag(e) {
+                    if (!isDragging) return;
+                    
+                    var clientX = e.type === 'mousemove' ? e.clientX : e.touches[0].clientX;
+                    var deltaX = clientX - startX;
+                    var newLeft = buttonLeft + deltaX;
+                    
+                    // 限制在滑轨内
+                    if (newLeft < 0) newLeft = 0;
+                    if (newLeft > sliderTrack.offsetWidth - sliderButton.offsetWidth) {
+                        newLeft = sliderTrack.offsetWidth - sliderButton.offsetWidth;
+                    }
+                    
+                    sliderButton.style.left = newLeft + 'px';
+                }
+                
+                function endDrag(e) {
+                    if (!isDragging) return;
+                    isDragging = false;
+                    
+                    document.removeEventListener('mousemove', drag);
+                    document.removeEventListener('touchmove', drag);
+                    document.removeEventListener('mouseup', endDrag);
+                    document.removeEventListener('touchend', endDrag);
+                    
+                    // 验证滑块位置
+                    var finalPosition = sliderButton.offsetLeft + sliderButton.offsetWidth / 2;
+                    submitVerification('slider', {
+                        position: finalPosition,
+                        token: token
+                    });
+                }
+            }
+        }
+        
+        // 初始化POW验证
+        function initPowVerification(tokenData) {
+            var verificationArea = document.getElementById('verification-area');
+            verificationArea.innerHTML = `
+                <div class="pow-container">
+                    <p>系统正在进行安全验证</p>
+                    <div id="pow-status">正在初始化工作量证明...</div>
+                </div>
+            `;
+            
+            // 获取POW挑战
+            fetch('/safeline-api/pow/challenge?token=' + encodeURIComponent(token))
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        solvePow(data.prefix, data.difficulty);
+                    } else {
+                        document.getElementById('result-message').innerHTML = '<span class="error">无法获取验证挑战</span>';
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('result-message').innerHTML = '<span class="error">无法加载POW验证</span>';
+                });
+                
+            function solvePow(prefix, difficulty) {
+                const statusElement = document.getElementById('pow-status');
+                statusElement.textContent = '计算中...';
+                
+                setTimeout(() => {
+                    findPowSolution(prefix, difficulty)
+                        .then(nonce => {
+                            statusElement.textContent = '验证中...';
+                            submitVerification('pow', {
+                                prefix: prefix,
+                                nonce: nonce,
+                                token: token
+                            });
+                        })
+                        .catch(error => {
+                            statusElement.textContent = '计算失败: ' + error;
+                        });
+                }, 100);
+            }
+            
+            async function findPowSolution(prefix, difficulty) {
+                const pattern = new RegExp('^' + '0'.repeat(difficulty));
+                let nonce = 0;
+                let hash;
+                
+                // 显示计算进度
+                const statusElement = document.getElementById('pow-status');
+                if (statusElement) {
+                    statusElement.innerText = '计算工作量证明...';
+                }
+                
+                // 每1000次计算更新一次UI
+                const updateInterval = 1000;
+                let lastUpdate = Date.now();
+                
+                while (true) {
+                    hash = sha256.hash(prefix + nonce);
+                    if (pattern.test(hash)) {
+                        return nonce.toString();
+                    }
+                    
+                    nonce++;
+                    
+                    // 更新UI
+                    const now = Date.now();
+                    if (now - lastUpdate > 100) { // 每100ms更新一次
+                        if (statusElement) {
+                            statusElement.innerText = `计算工作量证明... (${nonce} 次尝试)`;
+                        }
+                        // 给UI线程一些时间更新
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                        lastUpdate = now;
+                    }
+                    
+                    // 防止浏览器卡死，每10000次计算暂停一下
+                    if (nonce % 10000 === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                }
+            }
+        }
+        
+        // 提交验证
+        function submitVerification(type, data) {
+            // 显示加载状态
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('verification-area').classList.add('hidden');
+            document.getElementById('result-message').innerHTML = '';
+            
+            // 构建API端点
+            var endpoint = '';
+            switch (type) {
+                case 'captcha':
+                    endpoint = '/safeline-api/captcha/verify';
+                    break;
+                case 'slider':
+                    endpoint = '/safeline-api/slider/verify';
+                    break;
+                case 'pow':
+                    endpoint = '/safeline-api/pow/verify';
+                    break;
+                default:
+                    endpoint = '/safeline-api/captcha/verify';
+            }
+            
+            // 发送请求
+            fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: Object.keys(data).map(key => {
+                    return encodeURIComponent(key) + '=' + encodeURIComponent(data[key]);
+                }).join('&')
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('loading').style.display = 'none';
+                
+                if (data.success) {
+                    document.getElementById('result-message').innerHTML = '<span class="success">验证成功！即将跳转...</span>';
+                    
+                    // 设置验证通过的Cookie
+                    if (data.token) {
+                        document.cookie = "safeline_verified=" + data.token + "; path=/; max-age=1800";
+                    }
+                    
+                    // 跳转回原始URL
+                    setTimeout(function() {
+                        window.location.href = data.redirect_url;
+                    }, 1500);
+                } else {
+                    document.getElementById('result-message').innerHTML = '<span class="error">验证失败：' + (data.message || '未知错误') + '</span>';
+                    document.getElementById('verification-area').classList.remove('hidden');
+                    
+                    // 对于验证码错误，刷新验证码
+                    if (type === 'captcha') {
+                        document.getElementById('captcha-image').src = '/safeline-api/captcha/image?' + new Date().getTime();
+                    }
+                }
+            })
+            .catch(error => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('result-message').innerHTML = '<span class="error">请求错误，请重试</span>';
+                document.getElementById('verification-area').classList.remove('hidden');
+            });
+        }
+    </script>
+</body>
+</html>
