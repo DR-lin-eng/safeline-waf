@@ -1,0 +1,63 @@
+version: '3'
+
+services:
+  nginx:
+    image: openresty/openresty:alpine
+    container_name: safeline-waf-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf
+      - ./nginx/conf.d:/usr/local/openresty/nginx/conf/conf.d
+      - ./nginx/lua:/usr/local/openresty/nginx/lua
+      - ./config:/usr/local/openresty/nginx/conf/config
+      - ./logs:/usr/local/openresty/nginx/logs
+    depends_on:
+      - redis
+    restart: always
+    networks:
+      - safeline-network
+
+  redis:
+    image: redis:alpine
+    container_name: safeline-waf-redis
+    volumes:
+      - redis-data:/data
+    restart: always
+    networks:
+      - safeline-network
+
+  admin-backend:
+    build: ./admin/backend
+    container_name: safeline-waf-admin-backend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config:/app/config
+    environment:
+      - REDIS_HOST=redis
+      - NGINX_RELOAD_URL=http://nginx:80/_reload
+    depends_on:
+      - redis
+    restart: always
+    networks:
+      - safeline-network
+
+  admin-frontend:
+    build: ./admin/frontend
+    container_name: safeline-waf-admin-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - admin-backend
+    restart: always
+    networks:
+      - safeline-network
+
+networks:
+  safeline-network:
+    driver: bridge
+
+volumes:
+  redis-data:
