@@ -1,72 +1,97 @@
 <template>
   <div id="app">
-    <nav class="navbar navbar-dark sticky-top bg-primary flex-md-nowrap p-0 shadow">
-      <a class="navbar-brand col-md-3 col-lg-2 mr-0 px-3" href="#">
-        <span class="font-weight-bold">SafeLine WAF</span>
-      </a>
-      <button 
-        class="navbar-toggler position-absolute d-md-none collapsed" 
-        type="button" 
-        data-toggle="collapse" 
-        data-target="#sidebarMenu" 
-        aria-controls="sidebarMenu" 
-        aria-expanded="false" 
-        aria-label="Toggle navigation"
-      >
-        <span class="navbar-toggler-icon"></span>
-      </button>
-    </nav>
+    <!-- 登录页面不显示导航 -->
+    <template v-if="$route.path !== '/login'">
+      <nav class="navbar navbar-dark sticky-top bg-primary flex-md-nowrap p-0 shadow">
+        <a class="navbar-brand col-md-3 col-lg-2 mr-0 px-3" href="#">
+          <span class="font-weight-bold">SafeLine WAF</span>
+        </a>
+        <button 
+          class="navbar-toggler position-absolute d-md-none collapsed" 
+          type="button" 
+          data-toggle="collapse" 
+          data-target="#sidebarMenu" 
+          aria-controls="sidebarMenu" 
+          aria-expanded="false" 
+          aria-label="Toggle navigation"
+        >
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        
+        <ul class="navbar-nav px-3 ml-auto">
+          <li class="nav-item text-nowrap">
+            <button class="btn btn-link nav-link" @click="logout">
+              <i class="bi bi-box-arrow-right"></i> 退出
+            </button>
+          </li>
+        </ul>
+      </nav>
 
-    <div class="container-fluid">
-      <div class="row">
-        <nav id="sidebarMenu" class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse">
-          <div class="sidebar-sticky pt-3">
-            <ul class="nav flex-column">
-              <li class="nav-item">
-                <router-link class="nav-link" :to="{name: 'Dashboard'}" active-class="active">
-                  <i class="bi bi-speedometer2 mr-2"></i>
-                  仪表盘
-                </router-link>
-              </li>
-              <li class="nav-item">
-                <router-link class="nav-link" :to="{name: 'Sites'}" active-class="active">
-                  <i class="bi bi-globe mr-2"></i>
-                  站点管理
-                </router-link>
-              </li>
-              <li class="nav-item">
-                <router-link class="nav-link" :to="{name: 'Blacklist'}" active-class="active">
-                  <i class="bi bi-shield-lock mr-2"></i>
-                  IP黑名单
-                </router-link>
-              </li>
-              <li class="nav-item">
-                <router-link class="nav-link" :to="{name: 'Logs'}" active-class="active">
-                  <i class="bi bi-list-ul mr-2"></i>
-                  实时日志
-                </router-link>
-              </li>
-              <li class="nav-item">
-                <router-link class="nav-link" :to="{name: 'Settings'}" active-class="active">
-                  <i class="bi bi-gear mr-2"></i>
-                  系统设置
-                </router-link>
-              </li>
-            </ul>
-          </div>
-        </nav>
+      <div class="container-fluid">
+        <div class="row">
+          <nav id="sidebarMenu" class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse">
+            <div class="sidebar-sticky pt-3">
+              <ul class="nav flex-column">
+                <li class="nav-item">
+                  <router-link class="nav-link" :to="{name: 'Dashboard'}" active-class="active">
+                    <i class="bi bi-speedometer2 mr-2"></i>
+                    仪表盘
+                  </router-link>
+                </li>
+                <li class="nav-item">
+                  <router-link class="nav-link" :to="{name: 'Sites'}" active-class="active">
+                    <i class="bi bi-globe mr-2"></i>
+                    站点管理
+                  </router-link>
+                </li>
+                <li class="nav-item">
+                  <router-link class="nav-link" :to="{name: 'Blacklist'}" active-class="active">
+                    <i class="bi bi-shield-lock mr-2"></i>
+                    IP黑名单
+                  </router-link>
+                </li>
+                <li class="nav-item">
+                  <router-link class="nav-link" :to="{name: 'Logs'}" active-class="active">
+                    <i class="bi bi-list-ul mr-2"></i>
+                    实时日志
+                  </router-link>
+                </li>
+                <li class="nav-item">
+                  <router-link class="nav-link" :to="{name: 'Settings'}" active-class="active">
+                    <i class="bi bi-gear mr-2"></i>
+                    系统设置
+                  </router-link>
+                </li>
+              </ul>
+            </div>
+          </nav>
 
-        <main role="main" class="col-md-9 ml-sm-auto col-lg-10 px-md-4 py-4">
-          <router-view />
-        </main>
+          <main role="main" class="col-md-9 ml-sm-auto col-lg-10 px-md-4 py-4">
+            <router-view />
+          </main>
+        </div>
       </div>
-    </div>
+    </template>
+    
+    <!-- 登录页面 -->
+    <template v-else>
+      <router-view />
+    </template>
   </div>
 </template>
 
 <script>
 export default {
-  name: 'App'
+  name: 'App',
+  methods: {
+    logout() {
+      // 清除认证信息
+      localStorage.removeItem('auth_token');
+      sessionStorage.removeItem('auth_token');
+      // 跳转到登录页
+      this.$router.push('/login');
+    }
+  }
 }
 </script>
 
