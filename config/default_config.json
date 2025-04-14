@@ -1,0 +1,50 @@
+{
+  "global": {
+    "log_level": "info",
+    "default_action": "allow"
+  },
+  "ip_blacklist": [],
+  "ip_ranges": [],
+  "ddos_protection": {
+    "url_threshold": 60,
+    "url_window": 60,
+    "ip_threshold": 300,
+    "ip_window": 60,
+    "dynamic_scaling": true
+  },
+  "slow_ddos": {
+    "connection_threshold": 10,
+    "window": 60
+  },
+  "anti_cc": {
+    "cc_threshold": 60,
+    "cc_time_window": 60,
+    "cc_request_count": 60
+  },
+  "pow_config": {
+    "base_difficulty": 4,
+    "max_difficulty": 8
+  },
+  "behavior_analysis": {
+    "window_size": 60,
+    "min_requests": 10
+  },
+  "js_encryption": {
+    "renew_interval": 3600,
+    "variable_name_length": 8
+  },
+  "honeypot_settings": {
+    "enabled": true,
+    "traps": [
+      "/.well-known/safeline-trap",
+      "/admin_access",
+      "/wp-login.php",
+      "/.git/"
+    ]
+  },
+  "sampling": {
+    "enabled": true,
+    "rate": 0.01,
+    "anomaly_threshold": 5.0
+  }
+}
