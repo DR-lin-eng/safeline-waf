@@ -122,7 +122,7 @@ SafeLine WAF 采用模块化架构，主要由以下组件构成：
 
 ```bash
 # 下载安装脚本
-wget https://raw.githubusercontent.com/yourusername/safeline-waf/main/scripts/install.sh
+wget https://raw.githubusercontent.com/DR-lin-eng/safeline-waf/main/scripts/install.sh
 
 # 添加执行权限
 chmod +x install.sh
@@ -136,7 +136,7 @@ sudo ./install.sh
 1. 克隆代码仓库：
 
 ```bash
-git clone https://github.com/yourusername/safeline-waf.git
+git clone https://github.com/DR-lin-eng/safeline-waf.git
 cd safeline-waf
 ```
 
