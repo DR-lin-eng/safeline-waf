@@ -1,3 +1,11 @@
+import Vue from 'vue'
+import App from './App.vue'
+import router from './router'
+import axios from 'axios'
+import 'bootstrap/dist/css/bootstrap.css'
+import 'bootstrap-icons/font/bootstrap-icons.css'
+import 'bootstrap/dist/js/bootstrap.bundle.min.js'
+
 // 配置axios
 axios.defaults.baseURL = process.env.VUE_APP_API_URL || '/safeline-admin-api'
 
@@ -15,3 +23,10 @@ axios.interceptors.request.use(
     return Promise.reject(error)
   }
 )
+
+Vue.config.productionTip = false
+
+new Vue({
+  router,
+  render: h => h(App)
+}).$mount('#app')
