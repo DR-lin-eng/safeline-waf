@@ -11,6 +11,8 @@ env:
   REGISTRY: ghcr.io
   # 镜像名前缀，全小写
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+  # 提前启用 Node.js 24 运行时（2026-06-02 后成为默认值）
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
