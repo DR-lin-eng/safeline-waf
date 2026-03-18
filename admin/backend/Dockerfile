@@ -1,18 +1,18 @@
-FROM node:16-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
-# 复制项目文件
+# 安装依赖（利用层缓存）
 COPY package*.json ./
-
-# 安装依赖
-RUN npm install
+RUN npm install --omit=dev
 
 # 复制源代码
 COPY . .
 
-# 暴露端口
 EXPOSE 3000
 
-# 运行应用
+# 以非root用户运行，减小安全风险
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
 CMD ["npm", "start"]

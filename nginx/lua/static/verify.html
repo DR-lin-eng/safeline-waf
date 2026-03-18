@@ -240,6 +240,10 @@
     </script>
 
     <script>
+        var currentTokenData = null;
+        var currentToken = '';
+        var reloadVerificationFn = null;
+
         // 获取URL参数
         function getUrlParameter(name) {
             name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
@@ -247,18 +251,30 @@
             var results = regex.exec(location.search);
             return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
         }
+
+        function decodeBase64Url(input) {
+            var value = String(input || '').replace(/-/g, '+').replace(/_/g, '/');
+            while (value.length % 4 !== 0) {
+                value += '=';
+            }
+            return atob(value);
+        }
         
         // 解析验证Token
         var token = getUrlParameter('token');
+        currentToken = token || '';
         if (!token) {
             document.getElementById('result-message').innerHTML = '<span class="error">无效的验证请求。</span>';
             document.getElementById('verification-area').innerHTML = '<p>请返回首页重试。</p>';
         } else {
-            // 尝试解析token数据
             try {
-                // 在实际实现中，此部分将由服务器处理
-                // 这里仅作为一个模拟示例
-                var tokenData = JSON.parse(atob(token.replace(/-/g, '+').replace(/_/g, '/')));
+                var tokenParts = token.split('.');
+                if (tokenParts.length !== 2) {
+                    throw new Error('invalid token format');
+                }
+
+                var tokenData = JSON.parse(decodeBase64Url(tokenParts[0]));
+                currentTokenData = tokenData;
                 initVerification(tokenData);
             } catch (e) {
                 document.getElementById('result-message').innerHTML = '<span class="error">验证token无效。</span>';
@@ -266,6 +282,51 @@
             }
         }
         
+        function updateVerificationToken(nextToken) {
+            currentToken = nextToken || '';
+            token = currentToken;
+
+            if (!currentToken) {
+                return;
+            }
+
+            var nextUrl = window.location.pathname + '?token=' + encodeURIComponent(currentToken);
+            window.history.replaceState(null, '', nextUrl);
+
+            try {
+                var tokenParts = currentToken.split('.');
+                if (tokenParts.length === 2) {
+                    currentTokenData = JSON.parse(decodeBase64Url(tokenParts[0]));
+                }
+            } catch (e) {
+                currentTokenData = null;
+            }
+        }
+
+        function buildTokenQuery(tokenValue) {
+            return '?token=' + encodeURIComponent(tokenValue || currentToken || '');
+        }
+
+        function handleSuccessfulVerificationResponse(data) {
+            if (data.step_up_required && data.step_up_token) {
+                updateVerificationToken(data.step_up_token);
+                document.getElementById('result-message').innerHTML = '<span class="success">已完成初步验证，正在升级验证强度...</span>';
+                document.getElementById('verification-area').classList.remove('hidden');
+
+                setTimeout(function() {
+                    document.getElementById('result-message').innerHTML = '';
+                    initVerification(currentTokenData || {});
+                }, 300);
+                return;
+            }
+
+            document.getElementById('result-message').innerHTML = '<span class="success">验证成功！即将跳转...</span>';
+
+            setTimeout(function() {
+                window.location.href = data.redirect_url;
+            }, 1500);
+        }
+
         // 初始化验证界面
         function initVerification(tokenData) {
             var verificationType = tokenData.verification_type || 'captcha';
@@ -292,11 +353,34 @@
             verificationArea.innerHTML = `
                 <div class="captcha-container">
                     <p>请输入验证码</p>
-                    <img id="captcha-image" src="/safeline-api/captcha/image" alt="验证码">
+                    <img id="captcha-image" alt="验证码" style="cursor:pointer">
+                    <div class="text-muted" style="margin-top:8px;font-size:13px;">点击验证码图片可刷新</div>
                     <input type="text" id="captcha-input" class="captcha-input" placeholder="请输入上方验证码">
                     <button id="verify-button" class="button">验证</button>
                 </div>
             `;
+
+            var activeChallengeId = '';
+
+            function loadCaptchaChallenge() {
+                fetch('/safeline-api/captcha/image' + buildTokenQuery())
+                    .then(response => response.json())
+                    .then(data => {
+                        if (!data.success || !data.challenge_id || !data.image) {
+                            throw new Error(data.message || 'captcha challenge load failed');
+                        }
+
+                        activeChallengeId = data.challenge_id;
+                        document.getElementById('captcha-image').src = data.image;
+                    })
+                    .catch(() => {
+                        document.getElementById('result-message').innerHTML = '<span class="error">无法加载验证码，请刷新页面重试。</span>';
+                    });
+            }
+
+            reloadVerificationFn = loadCaptchaChallenge;
+            loadCaptchaChallenge();
+            document.getElementById('captcha-image').addEventListener('click', loadCaptchaChallenge);
             
             document.getElementById('verify-button').addEventListener('click', function() {
                 var captchaCode = document.getElementById('captcha-input').value;
@@ -304,10 +388,16 @@
                     document.getElementById('result-message').innerHTML = '<span class="error">请输入验证码</span>';
                     return;
                 }
+
+                if (!activeChallengeId) {
+                    document.getElementById('result-message').innerHTML = '<span class="error">验证码未准备好，请稍后重试</span>';
+                    return;
+                }
                 
                 submitVerification('captcha', {
                     code: captchaCode,
-                    token: token
+                    token: token,
+                    challenge_id: activeChallengeId
                 });
             });
         }
@@ -316,32 +406,48 @@
         function initSliderVerification(tokenData) {
             var verificationArea = document.getElementById('verification-area');
             verificationArea.innerHTML = `
-                <div class="slider-container">
-                    <div class="slider-track">
-                        <div class="slider-button">→</div>
+                <div class="slider-container" id="slider-container">
+                    <div class="slider-track" id="slider-track">
+                        <div class="slider-button" id="slider-button">→</div>
                     </div>
                 </div>
-                <p>请将滑块拖动到右侧</p>
+                <p>请将滑块拖动到最右侧</p>
             `;
+
+            reloadVerificationFn = function() {
+                initSliderVerification(tokenData);
+            };
             
-            // 获取滑块位置
-            fetch('/safeline-api/slider/generate')
+            fetch('/safeline-api/slider/generate' + buildTokenQuery())
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) {
-                        initSlider(data.position);
+                    if (data.success && data.challenge_id) {
+                        initSlider(
+                            data.challenge_id,
+                            Number(data.track_width) || 300,
+                            Number(data.button_width) || 40
+                        );
+                    } else {
+                        throw new Error(data.message || 'slider challenge load failed');
                     }
                 })
-                .catch(error => {
+                .catch(() => {
                     document.getElementById('result-message').innerHTML = '<span class="error">无法加载滑块验证</span>';
                 });
                 
-            function initSlider(targetPosition) {
-                var sliderButton = document.querySelector('.slider-button');
-                var sliderTrack = document.querySelector('.slider-track');
+            function initSlider(challengeId, trackWidth, buttonWidth) {
+                var sliderContainer = document.getElementById('slider-container');
+                var sliderButton = document.getElementById('slider-button');
+                var sliderTrack = document.getElementById('slider-track');
                 var isDragging = false;
                 var startX = 0;
                 var buttonLeft = 0;
+                var hasSubmitted = false;
+
+                sliderContainer.style.maxWidth = trackWidth + 'px';
+                sliderTrack.style.width = trackWidth + 'px';
+                sliderButton.style.width = buttonWidth + 'px';
+                sliderButton.style.height = buttonWidth + 'px';
                 
                 sliderButton.addEventListener('mousedown', startDrag);
                 sliderButton.addEventListener('touchstart', startDrag);
@@ -383,12 +489,17 @@
                     document.removeEventListener('touchmove', drag);
                     document.removeEventListener('mouseup', endDrag);
                     document.removeEventListener('touchend', endDrag);
+
+                    if (hasSubmitted) {
+                        return;
+                    }
+                    hasSubmitted = true;
                     
-                    // 验证滑块位置
                     var finalPosition = sliderButton.offsetLeft + sliderButton.offsetWidth / 2;
                     submitVerification('slider', {
                         position: finalPosition,
-                        token: token
+                        token: token,
+                        challenge_id: challengeId
                     });
                 }
             }
@@ -403,6 +514,10 @@
                     <div id="pow-status">正在初始化工作量证明...</div>
                 </div>
             `;
+
+            reloadVerificationFn = function() {
+                initPowVerification(tokenData);
+            };
             
             // 获取POW挑战
             fetch('/safeline-api/pow/challenge?token=' + encodeURIComponent(token))
@@ -518,24 +633,13 @@
                 document.getElementById('loading').style.display = 'none';
                 
                 if (data.success) {
-                    document.getElementById('result-message').innerHTML = '<span class="success">验证成功！即将跳转...</span>';
-                    
-                    // 设置验证通过的Cookie
-                    if (data.token) {
-                        document.cookie = "safeline_verified=" + data.token + "; path=/; max-age=1800";
-                    }
-                    
-                    // 跳转回原始URL
-                    setTimeout(function() {
-                        window.location.href = data.redirect_url;
-                    }, 1500);
+                    handleSuccessfulVerificationResponse(data);
                 } else {
                     document.getElementById('result-message').innerHTML = '<span class="error">验证失败：' + (data.message || '未知错误') + '</span>';
                     document.getElementById('verification-area').classList.remove('hidden');
                     
-                    // 对于验证码错误，刷新验证码
-                    if (type === 'captcha') {
-                        document.getElementById('captcha-image').src = '/safeline-api/captcha/image?' + new Date().getTime();
+                    if (typeof reloadVerificationFn === 'function') {
+                        reloadVerificationFn();
                     }
                 }
             })

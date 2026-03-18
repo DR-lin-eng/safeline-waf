@@ -76,16 +76,24 @@
                     <td>{{ log.reason || '-' }}</td>
                     <td>
                       <div class="btn-group btn-group-sm">
-                        <button 
-                          class="btn btn-outline-secondary" 
+                        <button
+                          class="btn btn-outline-secondary"
                           @click="viewLogDetails(log)"
                           title="查看详情"
                         >
                           <i class="bi bi-eye"></i>
                         </button>
-                        <button 
-                          v-if="!isIpBlacklisted(log.client_ip)" 
-                          class="btn btn-outline-danger" 
+                        <button
+                          v-if="canOpenInspection(log)"
+                          class="btn btn-outline-primary"
+                          @click="openInspection(log)"
+                          title="查看深度解析"
+                        >
+                          <i class="bi bi-search"></i>
+                        </button>
+                        <button
+                          v-if="!isIpBlacklisted(log.client_ip)"
+                          class="btn btn-outline-danger"
                           @click="blacklistIp(log.client_ip)"
                           title="加入黑名单"
                         >
@@ -176,10 +184,18 @@
             </div>
           </div>
           <div class="modal-footer">
-            <button 
-              v-if="selectedLog && !isIpBlacklisted(selectedLog.client_ip)" 
-              type="button" 
-              class="btn btn-danger mr-auto" 
+            <button
+              v-if="selectedLog && canOpenInspection(selectedLog)"
+              type="button"
+              class="btn btn-outline-primary mr-2"
+              @click="openInspection(selectedLog)"
+            >
+              <i class="bi bi-search mr-1"></i> 查看深度解析
+            </button>
+            <button
+              v-if="selectedLog && !isIpBlacklisted(selectedLog.client_ip)"
+              type="button"
+              class="btn btn-danger mr-auto"
               @click="blacklistIp(selectedLog.client_ip)"
             >
               <i class="bi bi-shield-slash mr-1"></i> 加入黑名单
@@ -240,6 +256,7 @@
 import axios from 'axios';
 import $ from 'jquery';
 import moment from 'moment';
+import { getApiErrorMessage, shouldHandleLocally } from '../utils/http';
 
 export default {
   name: 'Logs',
@@ -272,7 +289,7 @@ export default {
         // 搜索筛选
         if (this.filter.search) {
           const searchTerm = this.filter.search.toLowerCase();
-          return log.client_ip.includes(searchTerm) || 
+          return (log.client_ip && log.client_ip.toLowerCase().includes(searchTerm)) ||
                  (log.uri && log.uri.toLowerCase().includes(searchTerm));
         }
         
@@ -300,24 +317,28 @@ export default {
     async fetchLogs() {
       this.loading = true;
       try {
-        const response = await axios.get('/api/logs', { params: { limit: 500 } });
+        const response = await axios.get('/logs', { params: { limit: 500 } });
         if (response.data.success) {
           this.logs = response.data.data;
         }
       } catch (error) {
-        console.error('Error fetching logs:', error);
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取日志失败，请稍后重试。'));
+        }
       } finally {
         this.loading = false;
       }
     },
     async fetchBlacklist() {
       try {
-        const response = await axios.get('/api/blacklist');
+        const response = await axios.get('/blacklist');
         if (response.data.success) {
           this.blacklistedIps = response.data.data.map(item => item.ip);
         }
       } catch (error) {
-        console.error('Error fetching blacklist:', error);
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取黑名单状态失败，请稍后重试。'));
+        }
       }
     },
     refreshLogs() {
@@ -371,6 +392,30 @@ export default {
       this.selectedLog = log;
       $('#logDetailModal').modal('show');
     },
+    canOpenInspection(log) {
+      return Boolean(log && (log.request_id || log.client_ip || log.uri));
+    },
+    openInspection(log) {
+      if (!this.canOpenInspection(log)) {
+        return;
+      }
+
+      const query = {};
+      if (log.request_id) {
+        query.request_id = log.request_id;
+      } else {
+        // Fallback联动：只使用 ip + uri，避免 reason/trigger_reason 语义不一致导致必空
+        if (log.client_ip) {
+          query.ip = log.client_ip;
+        }
+        if (log.uri) {
+          query.uri = log.uri;
+        }
+      }
+
+      $('#logDetailModal').modal('hide');
+      this.$router.push({ name: 'DeepInspection', query }).catch(() => {});
+    },
     isIpBlacklisted(ip) {
       return this.blacklistedIps.includes(ip);
     },
@@ -383,13 +428,18 @@ export default {
       $('#blacklistModal').modal('show');
     },
     async confirmBlacklistIp() {
+      if (this.blacklistDuration.type === 'temporary' && Number(this.blacklistDuration.hours) < 1) {
+        this.$toast.error('临时封禁时长必须至少为 1 小时。');
+        return;
+      }
+
       try {
         const payload = {
           ip: this.ipToBlacklist,
           duration: this.blacklistDuration.type === 'permanent' ? -1 : this.blacklistDuration.hours * 3600
         };
         
-        const response = await axios.post('/api/blacklist', payload);
+        const response = await axios.post('/blacklist', payload);
         
         if (response.data.success) {
           // 更新黑名单列表
@@ -401,12 +451,14 @@ export default {
           // 如果日志详情模态框也打开，关闭它
           $('#logDetailModal').modal('hide');
           
-          // 显示成功消息
-          alert(`IP ${this.ipToBlacklist} 已成功添加到黑名单`);
+          this.$toast.success(`IP ${this.ipToBlacklist} 已加入黑名单。`);
+        } else {
+          this.$toast.error((response.data && response.data.message) || '添加到黑名单失败。');
         }
       } catch (error) {
-        console.error('Error adding IP to blacklist:', error);
-        alert('添加到黑名单失败');
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '添加到黑名单失败，请稍后重试。'));
+        }
       }
     },
     goToPage(page) {

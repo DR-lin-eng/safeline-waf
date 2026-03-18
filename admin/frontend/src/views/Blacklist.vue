@@ -39,15 +39,17 @@
               <table class="table table-hover">
                 <thead>
                   <tr>
-                    <th>IP 地址</th>
+                    <th>IP / 网段</th>
+                    <th>类型</th>
                     <th>到期时间</th>
                     <th>状态</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in blacklist" :key="item.ip">
-                    <td>{{ item.ip }}</td>
+                  <tr v-for="item in blacklist" :key="getEntryValue(item)">
+                    <td>{{ getEntryValue(item) }}</td>
+                    <td>{{ getEntryTypeText(item) }}</td>
                     <td>
                       <span v-if="item.permanent">永久</span>
                       <span v-else-if="item.expires_in > 0">{{ formatExpiryTime(item.expires_in) }}</span>
@@ -93,25 +95,28 @@
                   class="form-control" 
                   id="ipInput" 
                   v-model="newIp.ip" 
-                  placeholder="例如：192.168.1.1"
+                  placeholder="例如：192.168.1.1、2001:db8::1、10.0.0.0/24 或 10.0.0.1-10.0.0.9"
                   required
                 >
-                <small class="form-text text-muted">请输入要添加到黑名单的 IP 地址</small>
+                <small class="form-text text-muted">请输入要添加到黑名单的 IPv4、IPv6、CIDR 网段或 IPv4 范围</small>
               </div>
               
               <div class="form-group">
                 <label>封禁时长</label>
-                <div class="custom-control custom-radio">
-                  <input type="radio" id="temporaryBan" name="banDuration" class="custom-control-input" value="temporary" v-model="newIp.banType">
-                  <label class="custom-control-label" for="temporaryBan">临时封禁</label>
-                </div>
-                <div class="custom-control custom-radio">
-                  <input type="radio" id="permanentBan" name="banDuration" class="custom-control-input" value="permanent" v-model="newIp.banType">
-                  <label class="custom-control-label" for="permanentBan">永久封禁</label>
-                </div>
+                <template v-if="!isCurrentEntryCidr">
+                  <div class="custom-control custom-radio">
+                    <input type="radio" id="temporaryBan" name="banDuration" class="custom-control-input" value="temporary" v-model="newIp.banType">
+                    <label class="custom-control-label" for="temporaryBan">临时封禁</label>
+                  </div>
+                  <div class="custom-control custom-radio">
+                    <input type="radio" id="permanentBan" name="banDuration" class="custom-control-input" value="permanent" v-model="newIp.banType">
+                    <label class="custom-control-label" for="permanentBan">永久封禁</label>
+                  </div>
+                </template>
+                <small v-else class="form-text text-muted">网段或范围条目按永久封禁处理，并写入全局配置。</small>
               </div>
               
-              <div class="form-group" v-if="newIp.banType === 'temporary'">
+              <div class="form-group" v-if="!isCurrentEntryCidr && newIp.banType === 'temporary'">
                 <label for="durationInput">封禁持续时间（小时）</label>
                 <input 
                   type="number" 
@@ -146,8 +151,8 @@
             </button>
           </div>
           <div class="modal-body">
-            <p>您确定要将 IP <strong>{{ ipToRemove ? ipToRemove.ip : '' }}</strong> 从黑名单中移除吗？</p>
-            <p>移除后，此 IP 将能够再次访问您的站点。</p>
+            <p>您确定要将 <strong>{{ ipToRemove ? getEntryValue(ipToRemove) : '' }}</strong> 从黑名单中移除吗？</p>
+            <p>移除后，该条目将不再被 WAF 拦截。</p>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-dismiss="modal">取消</button>
@@ -162,6 +167,7 @@
 <script>
 import axios from 'axios';
 import $ from 'jquery';
+import { getApiErrorMessage, shouldHandleLocally } from '../utils/http';
 
 export default {
   name: 'Blacklist',
@@ -177,20 +183,100 @@ export default {
       }
     };
   },
+  computed: {
+    isCurrentEntryCidr() {
+      const entry = String(this.newIp.ip || '').trim();
+      return entry.includes('/') || entry.includes('-');
+    }
+  },
   created() {
     this.fetchBlacklist();
   },
   methods: {
+    isProbablyValidIp(value) {
+      const raw = String(value || '').trim().replace(/^\[/, '').replace(/\]$/, '');
+      if (!raw) {
+        return false;
+      }
+
+      const ipv4Match = raw.match(/^(\d{1,3})(?:\.(\d{1,3})){3}$/);
+      if (ipv4Match) {
+        return raw.split('.').every((part) => {
+          const num = Number(part);
+          return Number.isInteger(num) && num >= 0 && num <= 255;
+        });
+      }
+
+      return raw.includes(':') && /^[0-9a-f:.]+$/i.test(raw);
+    },
+    isProbablyValidBlacklistEntry(value) {
+      const raw = String(value || '').trim();
+      if (!raw) {
+        return false;
+      }
+
+      if (raw.includes('-')) {
+        const parts = raw.split('-');
+        return parts.length === 2
+          && this.isProbablyValidIp(parts[0].trim())
+          && this.isProbablyValidIp(parts[1].trim())
+          && !parts[0].includes(':')
+          && !parts[1].includes(':');
+      }
+
+      if (!raw.includes('/')) {
+        return this.isProbablyValidIp(raw);
+      }
+
+      const parts = raw.split('/');
+      if (parts.length !== 2) {
+        return false;
+      }
+
+      const ipPart = parts[0].trim();
+      const prefix = Number(parts[1]);
+      if (!Number.isInteger(prefix) || !this.isProbablyValidIp(ipPart)) {
+        return false;
+      }
+
+      return ipPart.includes(':')
+        ? prefix >= 0 && prefix <= 128
+        : prefix >= 0 && prefix <= 32;
+    },
+    getEntryValue(item) {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+
+      return item.entry || item.cidr || item.ip || '';
+    },
+    getEntryTypeText(item) {
+      const entry = this.getEntryValue(item);
+      if (!entry) {
+        return '-';
+      }
+
+      if (item && item.type === 'range') {
+        return '范围';
+      }
+
+      if (item && item.type === 'cidr') {
+        return 'CIDR';
+      }
+
+      return entry.includes('/') ? 'CIDR' : 'IP';
+    },
     async fetchBlacklist() {
       this.loading = true;
       try {
-        const response = await axios.get('/api/blacklist');
+        const response = await axios.get('/blacklist');
         if (response.data.success) {
           this.blacklist = response.data.data;
         }
       } catch (error) {
-        console.error('Error fetching blacklist:', error);
-        // Show error toast
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取黑名单失败，请稍后重试。'));
+        }
       } finally {
         this.loading = false;
       }
@@ -241,45 +327,62 @@ export default {
       $('#removeModal').modal('show');
     },
     async addIpToBlacklist() {
-      // 验证IP地址格式
-      const ipRegex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
-      if (!ipRegex.test(this.newIp.ip)) {
-        // Show error toast for invalid IP
+      const entry = String(this.newIp.ip || '').trim();
+      if (!this.isProbablyValidBlacklistEntry(entry)) {
+        this.$toast.error('请输入有效的 IPv4、IPv6、CIDR 网段或 IPv4 范围。');
+        return;
+      }
+
+      if (this.newIp.banType === 'temporary' && Number(this.newIp.duration) < 1) {
+        this.$toast.error('临时封禁时长必须至少为 1 小时。');
         return;
       }
       
       try {
+        const isConfigBackedEntry = entry.includes('/') || entry.includes('-');
         const payload = {
-          ip: this.newIp.ip,
-          duration: this.newIp.banType === 'permanent' ? -1 : this.newIp.duration * 3600
+          entry,
+          duration: isConfigBackedEntry || this.newIp.banType === 'permanent' ? -1 : this.newIp.duration * 3600
         };
         
-        const response = await axios.post('/api/blacklist', payload);
+        const response = await axios.post('/blacklist', payload);
         
         if (response.data.success) {
-          // Show success toast
           await this.fetchBlacklist();
           $('#addModal').modal('hide');
+          this.$toast.success('已加入 delta overlay，即将生效');
+        } else {
+          this.$toast.error((response.data && response.data.message) || '添加黑名单失败。');
         }
       } catch (error) {
-        console.error('Error adding IP to blacklist:', error);
-        // Show error toast
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '添加黑名单失败，请稍后重试。'));
+        }
       }
     },
     async removeIpFromBlacklist() {
       if (!this.ipToRemove) return;
       
       try {
-        const response = await axios.delete(`/api/blacklist/${this.ipToRemove.ip}`);
+        const entry = this.getEntryValue(this.ipToRemove);
+        const response = await axios.delete('/blacklist', {
+          params: {
+            entry
+          }
+        });
         
         if (response.data.success) {
-          // Show success toast
-          this.blacklist = this.blacklist.filter(item => item.ip !== this.ipToRemove.ip);
+          this.blacklist = this.blacklist.filter(item => this.getEntryValue(item) !== entry);
           $('#removeModal').modal('hide');
+          this.$toast.success(`${entry} 已从黑名单移除。`);
+          this.ipToRemove = null;
+        } else {
+          this.$toast.error((response.data && response.data.message) || '移除黑名单失败。');
         }
       } catch (error) {
-        console.error('Error removing IP from blacklist:', error);
-        // Show error toast
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '移除黑名单失败，请稍后重试。'));
+        }
       }
     }
   }

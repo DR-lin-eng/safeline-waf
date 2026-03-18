@@ -1,8 +1,7 @@
-version: '3'
-
 services:
   nginx:
-    image: openresty/openresty:alpine
+    build: ./nginx
+    image: safeline-waf-nginx:local
     container_name: safeline-waf-nginx
     ports:
       - "80:80"
@@ -13,36 +12,89 @@ services:
       - ./nginx/lua:/usr/local/openresty/nginx/lua
       - ./config:/usr/local/openresty/nginx/conf/config
       - ./logs:/usr/local/openresty/nginx/logs
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-safeline-redis-secret}
+      # 集群配置
+      - NODE_ID=${NODE_ID:-node-1}
+      - NODE_ROLE=${NODE_ROLE:-worker}
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: always
     networks:
       - safeline-network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: safeline-waf-redis
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-safeline-redis-secret}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --appendonly yes
     volumes:
       - redis-data:/data
     restart: always
     networks:
       - safeline-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-safeline-redis-secret}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   admin-backend:
     build: ./admin/backend
     container_name: safeline-waf-admin-backend
-    ports:
-      - "3000:3000"
+    # 注意: 不对外暴露3000端口，只通过nginx内部代理访问
+    expose:
+      - "3000"
     volumes:
       - ./config:/app/config
+      - ./nginx/conf.d:/nginx/conf.d
     environment:
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-safeline-redis-secret}
       - NGINX_RELOAD_URL=http://nginx:80/_reload
+      - NGINX_METRICS_URL=http://nginx:80/_metrics
+      - NGINX_CONF_DIR=/nginx/conf.d
+      # 认证配置 - 生产环境必须修改这些值！
+      - JWT_SECRET=${JWT_SECRET:-change-this-jwt-secret-in-production}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # 密码哈希: 使用 node -e "require('bcryptjs').hash('yourpassword',12).then(console.log)" 生成
+      # 默认密码: SafeLine@2024 (生产环境必须修改!)
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-$$2a$$12$$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LnITHEhV1xnSqxSyu}
+      - NODE_ENV=${NODE_ENV:-production}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
+      # 集群配置
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: always
     networks:
       - safeline-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   admin-frontend:
     build: ./admin/frontend
@@ -50,14 +102,24 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - admin-backend
+      admin-backend:
+        condition: service_healthy
     restart: always
     networks:
       - safeline-network
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 networks:
   safeline-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
 
 volumes:
   redis-data:

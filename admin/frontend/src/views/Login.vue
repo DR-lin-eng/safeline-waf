@@ -66,6 +66,8 @@
 </template>
 
 <script>
+import axios from 'axios'
+
 export default {
   name: 'Login',
   data() {
@@ -79,29 +81,38 @@ export default {
   },
   created() {
     // 检查是否已经登录
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token');
     if (token) {
-      this.$router.push('/');
+      this.$router.replace(this.$route.query.redirect || '/dashboard');
     }
   },
   methods: {
-    login() {
+    async login() {
       this.isLoading = true;
       this.error = null;
-      
-      // 演示用途 - 硬编码默认账号
-      if (this.username === 'admin' && this.password === 'safeline123') {
-        const authToken = btoa(this.username + ':' + this.password);
-        
-        if (this.remember) {
-          localStorage.setItem('auth_token', authToken);
-        } else {
-          sessionStorage.setItem('auth_token', authToken);
+
+      try {
+        const res = await axios.post('/login', {
+          username: this.username,
+          password: this.password
+        });
+
+        const token = res.data && res.data.token;
+        if (!token) {
+          throw new Error('No token in response');
         }
-        
-        this.$router.push('/');
-      } else {
-        this.error = '用户名或密码不正确';
+
+        if (this.remember) {
+          localStorage.setItem('auth_token', token);
+        } else {
+          sessionStorage.setItem('auth_token', token);
+        }
+
+        this.$router.replace(this.$route.query.redirect || '/dashboard');
+      } catch (err) {
+        const msg = err.response && err.response.data && err.response.data.message;
+        this.error = msg || '用户名或密码不正确';
+      } finally {
         this.isLoading = false;
       }
     }

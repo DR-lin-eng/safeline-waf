@@ -67,11 +67,13 @@ function _M.get_obfuscated_js()
         var %s = %s(%s(navigator.userAgent));
         var %s = %s(%s(document.referrer || ''));
         var %s = %s(%s(window.location.href));
-        
-        var %s = document.createElement('script');
-        %s.type = 'text/javascript';
-        %s.src = '/safeline-api/js_verify?ua=' + %s + '&ref=' + %s + '&loc=' + %s;
-        document.head.appendChild(%s);
+
+        var %s = [%s, %s, %s].join('.');
+        document.documentElement.setAttribute('data-safeline-js', 'ready');
+        try {
+            sessionStorage.setItem('safeline.js.fp', %s);
+        } catch (e) {}
+        document.cookie = 'safeline_js_fp=' + encodeURIComponent(%s).slice(0, 512) + '; path=/; max-age=1800; SameSite=Lax';
     };
     
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -90,9 +92,9 @@ function _M.get_obfuscated_js()
         var_names[2], var_names[1],
         var_names[6], -- loc var
         var_names[2], var_names[1],
-        var_names[7], -- script element
-        var_names[7], var_names[7],
+        var_names[7], -- combined fingerprint
         var_names[4], var_names[5], var_names[6],
+        var_names[7],
         var_names[7],
         var_names[3], var_names[3]
     )

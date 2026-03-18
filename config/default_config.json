@@ -3,17 +3,113 @@
     "log_level": "info",
     "default_action": "allow"
   },
+  "trusted_proxies": [
+    "127.0.0.1/32",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16"
+  ],
+  "trusted_bots": [
+    "googlebot",
+    "bingbot",
+    "yandexbot",
+    "duckduckbot",
+    "baiduspider",
+    "applebot",
+    "slurp",
+    "facebookexternalhit",
+    "twitterbot",
+    "linkedinbot",
+    "whatsapp",
+    "telegrambot",
+    "discordbot",
+    "semrushbot",
+    "ahrefsbot",
+    "mj12bot",
+    "dotbot",
+    "rogerbot"
+  ],
+  "redis_stats_max_qps": 200,
+  "redis_logs_max_qps": 50,
   "ip_blacklist": [],
   "ip_ranges": [],
+  "blacklist_cache": {
+    "lru_enabled": true,
+    "lru_size": 50000,
+    "negative_ttl": 5,
+    "positive_default_ttl": 300,
+    "redis_timeout_ms": 120
+  },
+  "blacklist_bloom": {
+    "enabled": false,
+    "bits": 4194304,
+    "hashes": 7,
+    "refresh_interval": 30,
+    "scan_count": 1000
+  },
   "ddos_protection": {
     "url_threshold": 60,
     "url_window": 60,
     "ip_threshold": 300,
     "ip_window": 60,
-    "dynamic_scaling": true
+    "dynamic_scaling": true,
+
+    "global_threshold": 3000,
+    "global_hard_threshold": 8000,
+
+    "global_burst_window": 5,
+    "global_burst_threshold": 800,
+
+    "unique_ip_window": 10,
+    "unique_ip_threshold": 300,
+    "unique_ip_track_start": 500
+  },
+  "adaptive_protection": {
+    "enabled": true,
+    "cpu_cores_per_10k_rps": 2,
+    "global_hard_reverify_window": 45,
+    "verified_scrubbing_rps": 20,
+    "hard_drop_on_overload": true,
+    "worker_connections_per_core": 8192,
+    "worker_rlimit_nofile_per_core": 65535,
+    "shared_dict_scale_per_core": 1.0
+  },
+  "anti_bypass": {
+    "origin_proxy_only_default": true,
+    "slider_step_up_on_high_risk": true,
+    "slider_verification_ttl": 300,
+    "captcha_verification_ttl": 900,
+    "pow_verification_ttl": 1200
+  },
+  "cluster": {
+    "enabled": false,
+    "node_id": "node-1",
+    "node_role": "primary",
+    "primary_api_url": "",
+    "nodes": [
+      {
+        "id": "node-1",
+        "name": "主节点",
+        "api_url": "http://admin-backend:3000",
+        "role": "primary",
+        "enabled": true,
+        "sync": true
+      }
+    ],
+    "sync": {
+      "enabled": true,
+      "config_interval": 30,
+      "blacklist_interval": 10,
+      "max_skew_seconds": 60,
+      "request_timeout_ms": 2000,
+      "fanout_concurrency": 6,
+      "retry_count": 2,
+      "retry_backoff_ms": 250
+    }
   },
   "slow_ddos": {
-    "connection_threshold": 10,
+    "enabled": true,
+    "connection_threshold": 50,
     "window": 60
   },
   "anti_cc": {

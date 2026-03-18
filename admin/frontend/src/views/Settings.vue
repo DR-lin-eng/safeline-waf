@@ -6,6 +6,34 @@
         <button type="button" class="btn btn-sm btn-primary" @click="saveSettings">
           <i class="bi bi-save mr-1"></i> 保存设置
         </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-outline-success ml-2"
+          @click="publishSnapshot"
+          :disabled="snapshotPublishing"
+        >
+          <i class="bi bi-upload mr-1"></i> 发布配置
+        </button>
+      </div>
+    </div>
+
+    <div class="row mb-3">
+      <div class="col-md-12">
+        <div class="alert alert-light d-flex justify-content-between align-items-center" role="alert">
+          <div>
+            当前版本: <code>{{ snapshotStatus.active_version || '-' }}</code>
+            <span class="mx-2">|</span>
+            发布时间: {{ formatPublishedAt(snapshotStatus.published_at) }}
+          </div>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            @click="fetchSnapshotStatus"
+            :disabled="snapshotLoading"
+          >
+            <i class="bi bi-arrow-clockwise mr-1"></i> 刷新
+          </button>
+        </div>
       </div>
     </div>
 
@@ -199,6 +227,59 @@
 
           <div class="card mb-4">
             <div class="card-header">
+              <h5 class="card-title mb-0">Anti-Bypass 默认策略</h5>
+            </div>
+            <div class="card-body">
+              <div class="form-check mb-3">
+                <input type="checkbox" class="form-check-input" id="originProxyOnlyDefault" v-model="config.anti_bypass.origin_proxy_only_default">
+                <label class="form-check-label" for="originProxyOnlyDefault">新站点默认仅允许可信代理回源</label>
+              </div>
+
+              <div class="form-check mb-3">
+                <input type="checkbox" class="form-check-input" id="sliderStepUpDefault" v-model="config.anti_bypass.slider_step_up_on_high_risk">
+                <label class="form-check-label" for="sliderStepUpDefault">高风险场景默认启用滑块升级</label>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group col-md-4">
+                  <label for="sliderVerificationTtlDefault">滑块放行 TTL (秒)</label>
+                  <input
+                    type="number"
+                    class="form-control"
+                    id="sliderVerificationTtlDefault"
+                    v-model="config.anti_bypass.slider_verification_ttl"
+                    min="60"
+                    max="3600"
+                  >
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="captchaVerificationTtlDefault">验证码放行 TTL (秒)</label>
+                  <input
+                    type="number"
+                    class="form-control"
+                    id="captchaVerificationTtlDefault"
+                    v-model="config.anti_bypass.captcha_verification_ttl"
+                    min="60"
+                    max="7200"
+                  >
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="powVerificationTtlDefault">POW 放行 TTL (秒)</label>
+                  <input
+                    type="number"
+                    class="form-control"
+                    id="powVerificationTtlDefault"
+                    v-model="config.anti_bypass.pow_verification_ttl"
+                    min="60"
+                    max="7200"
+                  >
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mb-4">
+            <div class="card-header">
               <h5 class="card-title mb-0">行为分析设置</h5>
             </div>
             <div class="card-body">
@@ -343,6 +424,146 @@
                   </div>
                 </div>
               </div>
+
+              <div class="form-row">
+                <div class="col-md-12">
+                  <div class="form-group mb-0">
+                    <label for="trustedBotsInput">可信爬虫 UA 关键字</label>
+                    <textarea
+                      id="trustedBotsInput"
+                      class="form-control"
+                      rows="6"
+                      v-model="trustedBotsText"
+                      placeholder="googlebot&#10;bingbot&#10;slurp"
+                    ></textarea>
+                    <small class="form-text text-muted">
+                      每行一个关键字，匹配时不区分大小写。留空表示不额外放行任何爬虫 UA。
+                    </small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row mb-4">
+        <div class="col-md-12">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="card-title mb-0">多核心自适应</h5>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group col-md-3">
+                  <div class="form-check mt-4">
+                    <input type="checkbox" class="form-check-input" id="adaptiveEnabled" v-model="config.adaptive_protection.enabled">
+                    <label class="form-check-label" for="adaptiveEnabled">启用自适应</label>
+                  </div>
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="cpuCoresPer10kRps">每万RPS所需核数</label>
+                  <input type="number" class="form-control" id="cpuCoresPer10kRps" v-model="config.adaptive_protection.cpu_cores_per_10k_rps" min="1" step="0.5">
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="verifiedScrubbingRps">已验证清洗限速(RPS)</label>
+                  <input type="number" class="form-control" id="verifiedScrubbingRps" v-model="config.adaptive_protection.verified_scrubbing_rps" min="1">
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="globalHardReverifyWindow">硬压复验窗口(秒)</label>
+                  <input type="number" class="form-control" id="globalHardReverifyWindow" v-model="config.adaptive_protection.global_hard_reverify_window" min="10">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group col-md-4">
+                  <label for="workerConnectionsPerCore">每核建议连接数</label>
+                  <input type="number" class="form-control" id="workerConnectionsPerCore" v-model="config.adaptive_protection.worker_connections_per_core" min="1024">
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="workerRlimitPerCore">每核建议FD上限</label>
+                  <input type="number" class="form-control" id="workerRlimitPerCore" v-model="config.adaptive_protection.worker_rlimit_nofile_per_core" min="1024">
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="sharedDictScalePerCore">共享内存倍率/核</label>
+                  <input type="number" class="form-control" id="sharedDictScalePerCore" v-model="config.adaptive_protection.shared_dict_scale_per_core" min="0.1" step="0.1">
+                </div>
+              </div>
+              <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="hardDropOnOverload" v-model="config.adaptive_protection.hard_drop_on_overload">
+                <label class="form-check-label" for="hardDropOnOverload">极限过载时直接硬丢弃</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row mb-4">
+        <div class="col-md-12">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="card-title mb-0">集群主副设置</h5>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group col-md-3">
+                  <div class="form-check mt-4">
+                    <input type="checkbox" class="form-check-input" id="clusterEnabled" v-model="config.cluster.enabled">
+                    <label class="form-check-label" for="clusterEnabled">启用集群</label>
+                  </div>
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterNodeId">当前节点ID</label>
+                  <input type="text" class="form-control" id="clusterNodeId" v-model="config.cluster.node_id">
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterNodeRole">节点角色</label>
+                  <select class="form-control" id="clusterNodeRole" v-model="config.cluster.node_role">
+                    <option value="primary">主节点</option>
+                    <option value="secondary">从节点</option>
+                  </select>
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterPrimaryApi">主节点API地址</label>
+                  <input type="text" class="form-control" id="clusterPrimaryApi" v-model="config.cluster.primary_api_url" placeholder="http://10.0.0.10:3000">
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group col-md-3">
+                  <div class="form-check mt-4">
+                    <input type="checkbox" class="form-check-input" id="clusterSyncEnabled" v-model="config.cluster.sync.enabled">
+                    <label class="form-check-label" for="clusterSyncEnabled">启用自动同步</label>
+                  </div>
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterConfigInterval">配置同步间隔(秒)</label>
+                  <input type="number" class="form-control" id="clusterConfigInterval" v-model="config.cluster.sync.config_interval" min="5">
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterBlacklistInterval">黑名单同步间隔(秒)</label>
+                  <input type="number" class="form-control" id="clusterBlacklistInterval" v-model="config.cluster.sync.blacklist_interval" min="3">
+                </div>
+                <div class="form-group col-md-3">
+                  <label for="clusterSyncTimeout">同步超时(ms)</label>
+                  <input type="number" class="form-control" id="clusterSyncTimeout" v-model="config.cluster.sync.request_timeout_ms" min="300">
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group col-md-4">
+                  <label for="clusterFanoutConcurrency">并发扇出数</label>
+                  <input type="number" class="form-control" id="clusterFanoutConcurrency" v-model="config.cluster.sync.fanout_concurrency" min="1">
+                  <small class="form-text text-muted">主节点并发同步从节点数量（十几个节点建议 4-8）</small>
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="clusterRetryCount">失败重试次数</label>
+                  <input type="number" class="form-control" id="clusterRetryCount" v-model="config.cluster.sync.retry_count" min="0" max="10">
+                </div>
+                <div class="form-group col-md-4">
+                  <label for="clusterRetryBackoff">重试退避(ms)</label>
+                  <input type="number" class="form-control" id="clusterRetryBackoff" v-model="config.cluster.sync.retry_backoff_ms" min="50">
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -375,23 +596,96 @@
 <script>
 import axios from 'axios';
 import $ from 'jquery';
+import { getApiErrorMessage, shouldHandleLocally } from '../utils/http';
+
+const DEFAULT_TRUSTED_BOTS = [
+  'googlebot',
+  'bingbot',
+  'yandexbot',
+  'duckduckbot',
+  'baiduspider',
+  'applebot',
+  'slurp',
+  'facebookexternalhit',
+  'twitterbot',
+  'linkedinbot',
+  'whatsapp',
+  'telegrambot',
+  'discordbot',
+  'semrushbot',
+  'ahrefsbot',
+  'mj12bot',
+  'dotbot',
+  'rogerbot'
+];
 
 export default {
   name: 'Settings',
   data() {
     return {
       loading: true,
+      snapshotLoading: false,
+      snapshotPublishing: false,
+      snapshotStatus: {
+        active_version: null,
+        published_at: null
+      },
+      trustedBotsText: DEFAULT_TRUSTED_BOTS.join('\n'),
       config: {
         global: {
           log_level: 'info',
           default_action: 'allow'
         },
+        trusted_bots: DEFAULT_TRUSTED_BOTS.slice(),
         ddos_protection: {
           url_threshold: 60,
           url_window: 60,
           ip_threshold: 300,
           ip_window: 60,
           dynamic_scaling: true
+        },
+        adaptive_protection: {
+          enabled: true,
+          cpu_cores_per_10k_rps: 2,
+          global_hard_reverify_window: 45,
+          verified_scrubbing_rps: 20,
+          hard_drop_on_overload: true,
+          worker_connections_per_core: 8192,
+          worker_rlimit_nofile_per_core: 65535,
+          shared_dict_scale_per_core: 1.0
+        },
+        anti_bypass: {
+          origin_proxy_only_default: true,
+          slider_step_up_on_high_risk: true,
+          slider_verification_ttl: 300,
+          captcha_verification_ttl: 900,
+          pow_verification_ttl: 1200
+        },
+        cluster: {
+          enabled: false,
+          node_id: 'node-1',
+          node_role: 'primary',
+          primary_api_url: '',
+          nodes: [
+            {
+              id: 'node-1',
+              name: '主节点',
+              api_url: 'http://admin-backend:3000',
+              role: 'primary',
+              enabled: true,
+              sync: true
+            }
+          ],
+          sync: {
+            enabled: true,
+            config_interval: 30,
+            blacklist_interval: 10,
+            max_skew_seconds: 60,
+            request_timeout_ms: 2000,
+            fanout_concurrency: 6,
+            retry_count: 2,
+            retry_backoff_ms: 250
+          }
         },
         slow_ddos: {
           connection_threshold: 10,
@@ -433,21 +727,70 @@ export default {
   },
   created() {
     this.fetchSettings();
+    this.fetchSnapshotStatus();
   },
   methods: {
     async fetchSettings() {
       this.loading = true;
       try {
-        const response = await axios.get('/api/config');
+        const response = await axios.get('/config');
         if (response.data.success) {
           // 合并配置，保留默认值的属性
           this.mergeConfig(response.data.data);
+        } else {
+          this.$toast.error((response.data && response.data.message) || '加载系统设置失败。');
         }
       } catch (error) {
-        console.error('Error fetching settings:', error);
-        // Show error toast
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '加载系统设置失败，请稍后重试。'));
+        }
       } finally {
         this.loading = false;
+      }
+    },
+    formatPublishedAt(value) {
+      if (!value) {
+        return '-';
+      }
+
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date.toLocaleString() : String(value);
+    },
+    async fetchSnapshotStatus() {
+      this.snapshotLoading = true;
+      try {
+        const response = await axios.get('/snapshot/status');
+        const payload = response && response.data ? response.data : null;
+        if (payload && payload.code === 0) {
+          this.snapshotStatus = payload.data || { active_version: null, published_at: null };
+        } else {
+          this.$toast.error((payload && payload.message) || '获取快照状态失败。');
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取快照状态失败，请稍后重试。'));
+        }
+      } finally {
+        this.snapshotLoading = false;
+      }
+    },
+    async publishSnapshot() {
+      this.snapshotPublishing = true;
+      try {
+        const response = await axios.post('/snapshot/publish');
+        const payload = response && response.data ? response.data : null;
+        if (payload && payload.code === 0) {
+          this.$toast.success('发布成功');
+          await this.fetchSnapshotStatus();
+        } else {
+          this.$toast.error((payload && payload.message) || '发布失败。');
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '发布失败，请稍后重试。'));
+        }
+      } finally {
+        this.snapshotPublishing = false;
       }
     },
     mergeConfig(newConfig) {
@@ -468,6 +811,7 @@ export default {
       };
       
       merge(this.config, newConfig);
+      this.syncTrustedBotsText();
     },
     addTrap() {
       this.config.honeypot_settings.traps.push("");
@@ -475,23 +819,43 @@ export default {
     removeTrap(index) {
       this.config.honeypot_settings.traps.splice(index, 1);
     },
+    syncTrustedBotsText() {
+      const bots = Array.isArray(this.config.trusted_bots) ? this.config.trusted_bots : [];
+      this.trustedBotsText = bots.join('\n');
+    },
+    normalizeTrustedBots() {
+      const trustedBots = String(this.trustedBotsText || '')
+        .split(/\r?\n|,/)
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean)
+        .filter((item, index, list) => list.indexOf(item) === index);
+
+      this.config.trusted_bots = trustedBots;
+      this.trustedBotsText = trustedBots.join('\n');
+    },
     saveSettings() {
       $('#saveModal').modal('show');
     },
     async confirmSaveSettings() {
       try {
-        const response = await axios.put('/api/config', this.config);
+        this.normalizeTrustedBots();
+        this.config.honeypot_settings.traps = this.config.honeypot_settings.traps
+          .map((trap) => String(trap || '').trim())
+          .filter(Boolean);
+
+        const response = await axios.put('/config', this.config);
         
         if (response.data.success) {
-          // Show success toast
-          alert('设置已成功保存');
+          this.$toast.success(response.data.message || '设置已成功保存。');
           $('#saveModal').modal('hide');
+          this.fetchSnapshotStatus();
         } else {
-          alert('保存设置失败: ' + response.data.message);
+          this.$toast.error((response.data && response.data.message) || '保存设置失败。');
         }
       } catch (error) {
-        console.error('Error saving settings:', error);
-        alert('保存设置时发生错误');
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '保存设置时发生错误，请稍后重试。'));
+        }
       }
     }
   }

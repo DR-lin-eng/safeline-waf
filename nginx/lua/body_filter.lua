@@ -1,6 +1,32 @@
 -- 响应体处理脚本
 local js_encrypt = require "js_encrypt"
 
+local function inject_script(response_body, js_code)
+    if not response_body or response_body == "" or not js_code or js_code == "" then
+        return response_body
+    end
+
+    local replacement = "<script>" .. js_code .. "</script></head>"
+    local injected, _, err = ngx.re.sub(response_body, "</head>", replacement, "ijo")
+    if injected and not err and injected ~= response_body then
+        return injected
+    end
+
+    replacement = "<script>" .. js_code .. "</script></body>"
+    injected, _, err = ngx.re.sub(response_body, "</body>", replacement, "ijo")
+    if injected and not err and injected ~= response_body then
+        return injected
+    end
+
+    replacement = "<script>" .. js_code .. "</script></html>"
+    injected, _, err = ngx.re.sub(response_body, "</html>", replacement, "ijo")
+    if injected and not err and injected ~= response_body then
+        return injected
+    end
+
+    return response_body .. "<script>" .. js_code .. "</script>"
+end
+
 -- 如果需要修改响应体
 if ngx.ctx.modify_response then
     local content_type = ngx.header.content_type
@@ -25,13 +51,13 @@ if ngx.ctx.modify_response then
             -- 注入JS加密脚本
             if ngx.ctx.js_encryption then
                 local js_code = js_encrypt.get_obfuscated_js()
-                response_body = response_body:gsub("</head>", "<script>" .. js_code .. "</script></head>")
+                response_body = inject_script(response_body, js_code)
             end
             
             -- 注入防止F12调试的脚本
             if ngx.ctx.prevent_f12 then
                 local js_code = js_encrypt.get_prevent_f12_js()
-                response_body = response_body:gsub("</head>", "<script>" .. js_code .. "</script></head>")
+                response_body = inject_script(response_body, js_code)
             end
             
             ngx.arg[1] = response_body

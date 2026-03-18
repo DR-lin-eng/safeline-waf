@@ -1,7 +1,15 @@
 {
   "domain": "example.com",
   "backend_server": "http://backend:8080",
+  "backend_port_follow": false,
   "enabled": true,
+  "tls": {
+    "enabled": false,
+    "cert_path": "/usr/local/openresty/nginx/conf/config/certs/example.com.crt",
+    "key_path": "/usr/local/openresty/nginx/conf/config/certs/example.com.key",
+    "redirect_http_to_https": true,
+    "http2_enabled": true
+  },
   "protection": {
     "browser_detection_enabled": true,
     "environment_detection_enabled": true,
@@ -10,7 +18,13 @@
     "global_rate_limit_count": 60,
     "global_rate_limit_window": 60,
     "ddos_protection_enabled": true,
+    "ddos_reverify_window": 120,
+    "slow_ddos_protection_enabled": true,
+    "origin_proxy_only_enabled": true,
     "random_attack_protection_enabled": true,
+    "request_content_inspection_enabled": true,
+    "request_body_max_bytes": 32768,
+    "request_field_max_len": 4096,
     "anti_cc_enabled": true,
     "automation_detection_enabled": true,
     "traffic_analysis_enabled": true,
@@ -29,6 +43,10 @@
     "pow_enabled": true,
     "pow_base_difficulty": 4,
     "pow_max_difficulty": 8,
+    "slider_step_up_on_high_risk": true,
+    "slider_verification_ttl": 300,
+    "captcha_verification_ttl": 900,
+    "pow_verification_ttl": 1200,
     "verification_methods": {
       "ip_address": true,
       "user_agent": true,
