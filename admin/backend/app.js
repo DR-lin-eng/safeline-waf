@@ -2024,21 +2024,25 @@ apiRouter.get('/sites', async (req, res) => {
   try {
     const files = await fs.readdir(SITES_DIR);
     const siteFiles = files.filter(file => file.endsWith('.json'));
-    
+
     const sites = [];
     for (const file of siteFiles) {
       const siteConfig = await readConfigFile(path.join(SITES_DIR, file));
       if (siteConfig && siteConfig.domain) {
-        const tlsConfig = normalizeSiteTlsConfig(siteConfig, siteConfig.domain);
+        const normalizedDomain = String(siteConfig.domain || '').toLowerCase();
+        const normalizedSiteConfig = normalizeSiteConfig(siteConfig, normalizedDomain);
+        const tlsConfig = normalizeSiteTlsConfig(normalizedSiteConfig, normalizedDomain);
         sites.push({
-          domain: siteConfig.domain,
-          enabled: siteConfig.enabled || false,
+          domain: normalizedSiteConfig.domain,
+          enabled: normalizedSiteConfig.enabled || false,
+          backend_server: normalizedSiteConfig.backend_server || '',
+          backend_port_follow: normalizedSiteConfig.backend_port_follow === true,
           tls_enabled: tlsConfig.enabled,
           filename: file
         });
       }
     }
-    
+
     res.json({ success: true, data: sites });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to fetch sites list');
