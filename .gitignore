@@ -1,0 +1,4 @@
+.claude/
+.codex-tmp/
+admin/frontend/dist/
+admin/frontend/node_modules/
