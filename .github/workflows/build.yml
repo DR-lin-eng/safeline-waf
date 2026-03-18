@@ -1,0 +1,96 @@
+name: Build & Push Multi-Arch Images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像名前缀，全小写
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.image.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: safeline-nginx
+            context: ./nginx
+          - name: safeline-admin-backend
+            context: ./admin/backend
+          - name: safeline-admin-frontend
+            context: ./admin/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ARM 交叉编译支持
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 自动生成镜像标签：
+      #   main 分支  → :main, :main-<sha>
+      #   v1.2.3 tag → :1.2.3, :1.2, :latest
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=branch,suffix=-{{sha}},format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions 层缓存，按镜像隔离 scope
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+
+  # 所有镜像构建完成后，更新 README 中的 image digest（可选徽章更新触发点）
+  summary:
+    name: Build summary
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          echo "### Build result" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| safeline-nginx | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| safeline-admin-backend | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| safeline-admin-frontend | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY

@@ -268,21 +268,29 @@ EOF
 # 构建并启动Docker容器
 build_and_run() {
     info "构建并启动SafeLine WAF..."
-    
-    cd /opt/safeline-waf
-    
-    # 停止可能已经运行的容器
-    docker_compose down
 
-    # 构建并启动
-    docker_compose up -d --build
-    
+    cd /opt/safeline-waf
+
+    # 停止可能已经运行的容器
+    docker_compose -f docker-compose.prod.yml down 2>/dev/null || true
+
+    # 优先使用预构建镜像（docker-compose.prod.yml），无需本地编译
+    info "拉取预构建多架构镜像（amd64/arm64）..."
+    SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f docker-compose.prod.yml pull
+
     if [ $? -ne 0 ]; then
-        error "Docker构建或启动失败"
+        warn "拉取镜像失败，回退到本地编译..."
+        docker_compose up -d --build
+    else
+        SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f docker-compose.prod.yml up -d
+    fi
+
+    if [ $? -ne 0 ]; then
+        error "Docker 启动失败"
         exit 1
     fi
-    
-    success "SafeLine WAF已成功启动"
+
+    success "SafeLine WAF 已成功启动"
 }
 
 # 检查服务状态
@@ -292,7 +300,7 @@ check_status() {
     sleep 5
     
     # 检查容器状态
-    CONTAINERS=$(docker_compose ps -q)
+    CONTAINERS=$(docker_compose -f docker-compose.prod.yml ps -q)
     
     if [ -z "$CONTAINERS" ]; then
         error "没有找到运行中的容器"
