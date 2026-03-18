@@ -305,6 +305,73 @@ build_and_run() {
         return $rc
     }
 
+    # compose up 失败时自动诊断并输出有用信息
+    _diagnose_failure() {
+        local compose_file="$1"
+        echo
+        error "======= 启动失败诊断 ======="
+
+        # 1. 磁盘空间
+        local disk_avail
+        disk_avail=$(df -h /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}')
+        info "Docker 目录可用空间: ${disk_avail:-未知}"
+
+        # 2. 端口占用
+        for port in 80 443 8080; do
+            if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
+               netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
+                warn "端口 ${port} 已被占用:"
+                ss -tlnp 2>/dev/null | grep ":${port} " || \
+                netstat -tlnp 2>/dev/null | grep ":${port} "
+            fi
+        done
+
+        # 3. 逐容器输出状态 + 末尾日志
+        local containers
+        containers=$(docker ps -a --filter "name=safeline-waf" --format "{{.Names}}\t{{.Status}}" 2>/dev/null)
+        if [ -n "$containers" ]; then
+            info "容器状态:"
+            echo "$containers"
+            echo
+            while IFS=$'\t' read -r name status; do
+                local health
+                health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' "$name" 2>/dev/null)
+                if echo "$status" | grep -qiE "exited|unhealthy|error"; then
+                    error "[$name] 状态: $status  健康: $health"
+                    info "--- $name 最后 30 行日志 ---"
+                    docker logs --tail 30 "$name" 2>&1 | sed "s/^/  /"
+                    echo
+                    # 常见错误提示
+                    local logs
+                    logs=$(docker logs --tail 50 "$name" 2>&1)
+                    if echo "$logs" | grep -qi "redis.*connect\|ECONNREFUSED.*6379"; then
+                        warn "[$name] Redis 连接失败 → 检查 REDIS_PASSWORD / REDIS_HOST 环境变量"
+                    fi
+                    if echo "$logs" | grep -qi "JWT_SECRET\|invalid.*secret\|secret.*required"; then
+                        warn "[$name] JWT_SECRET 未设置或过短（需 ≥ 32 字符）"
+                        warn "       生成命令: openssl rand -hex 32"
+                    fi
+                    if echo "$logs" | grep -qi "EADDRINUSE\|address already in use"; then
+                        warn "[$name] 端口被占用 → 检查是否有其他进程监听相同端口"
+                    fi
+                    if echo "$logs" | grep -qi "permission denied\|EACCES"; then
+                        warn "[$name] 权限不足 → 检查挂载目录权限"
+                    fi
+                    if echo "$logs" | grep -qi "no space left\|ENOSPC"; then
+                        error "[$name] 磁盘空间不足"
+                    fi
+                fi
+            done <<< "$containers"
+        fi
+
+        error "============================"
+        error "手动排查命令:"
+        echo "  docker logs safeline-waf-admin-backend --tail 50"
+        echo "  docker logs safeline-waf-nginx --tail 50"
+        echo "  docker inspect safeline-waf-admin-backend | grep -A5 Health"
+        echo
+    }
+
     if [ -f "$PROD_COMPOSE" ]; then
         docker_compose -f "$PROD_COMPOSE" down 2>/dev/null || true
 
@@ -325,7 +392,8 @@ build_and_run() {
     fi
 
     if [ $? -ne 0 ]; then
-        error "Docker 启动失败"
+        _diagnose_failure "$PROD_COMPOSE"
+        error "Docker 启动失败，请根据上方诊断信息排查"
         exit 1
     fi
 
@@ -352,13 +420,15 @@ check_status() {
     for CONTAINER in $CONTAINERS; do
         STATUS=$(docker inspect --format='{{.State.Status}}' $CONTAINER)
         NAME=$(docker inspect --format='{{.Name}}' $CONTAINER | sed 's/\///')
-        
-        if [ "$STATUS" != "running" ]; then
-            error "容器 $NAME 状态异常: $STATUS"
-            docker logs $CONTAINER
+        HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' $CONTAINER)
+
+        if [ "$STATUS" != "running" ] || [ "$HEALTH" = "unhealthy" ]; then
+            error "容器 $NAME 状态异常: status=$STATUS health=$HEALTH"
+            info "--- $NAME 最后 30 行日志 ---"
+            docker logs --tail 30 $CONTAINER 2>&1
             exit 1
         else
-            info "容器 $NAME 正在运行"
+            info "容器 $NAME 正在运行 (health=$HEALTH)"
         fi
     done
     
