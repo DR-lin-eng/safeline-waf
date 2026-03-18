@@ -279,16 +279,40 @@ build_and_run() {
              -o "$PROD_COMPOSE" || true
     fi
 
+    # Docker 刚安装后 iptables 链可能尚未初始化，预先重启 daemon 确保网络正常
+    _ensure_docker_network() {
+        if ! docker network ls &>/dev/null; then
+            warn "Docker 网络不可用，重启 Docker daemon..."
+            systemctl restart docker
+            sleep 3
+        fi
+    }
+    _ensure_docker_network
+
+    # 执行 compose up，若遇到 iptables 链缺失则重启 Docker 后重试一次
+    _compose_up() {
+        local output
+        output=$(SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$1" up -d 2>&1)
+        local rc=$?
+        echo "$output"
+        if [ $rc -ne 0 ] && echo "$output" | grep -q "No chain/target/match"; then
+            warn "iptables 链缺失，重启 Docker 后重试..."
+            systemctl restart docker
+            sleep 5
+            SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$1" up -d
+            return $?
+        fi
+        return $rc
+    }
+
     if [ -f "$PROD_COMPOSE" ]; then
-        # 停止旧容器
         docker_compose -f "$PROD_COMPOSE" down 2>/dev/null || true
 
-        # 拉取预构建多架构镜像，无需本地编译
         info "拉取预构建多架构镜像（amd64/arm64）..."
         SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$PROD_COMPOSE" pull
 
         if [ $? -eq 0 ]; then
-            SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$PROD_COMPOSE" up -d
+            _compose_up "$PROD_COMPOSE"
         else
             warn "拉取镜像失败，回退到本地编译..."
             docker_compose down 2>/dev/null || true
