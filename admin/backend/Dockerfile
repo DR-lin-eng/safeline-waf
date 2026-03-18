@@ -20,7 +20,7 @@ COPY . .
 EXPOSE 3000
 
 # 以非root用户运行，减小安全风险
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -g 10001 -S appgroup && adduser -S -u 10001 appuser -G appgroup
 USER appuser
 
 CMD ["npm", "start"]
