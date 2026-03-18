@@ -11,6 +11,11 @@ NC='\033[0m' # No Color
 
 ENV_GENERATED_TEMP_PASSWORD=''
 ENV_TEMP_PASSWORD_IS_GENERATED=0
+INSTALL_MODE=''
+INSTALL_MODE_LABEL=''
+ENV_ACTION=''
+ENV_EXISTED_BEFORE=0
+ENV_WAS_REGENERATED=0
 
 # 输出信息函数
 info() {
@@ -27,6 +32,101 @@ error() {
 
 success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+select_install_mode() {
+    local install_root="/opt/safeline-waf"
+    local env_file="$install_root/.env"
+    local mode_choice=''
+
+    ENV_EXISTED_BEFORE=0
+    if [ -f "$env_file" ]; then
+        ENV_EXISTED_BEFORE=1
+    fi
+
+    if ! [ -t 0 ] || ! [ -t 1 ]; then
+        mode_choice=${INSTALL_MODE:-${SAFELINE_INSTALL_MODE:-}}
+        case "$mode_choice" in
+            new)
+                INSTALL_MODE='new'
+                INSTALL_MODE_LABEL='新安装'
+                ENV_ACTION='create_if_missing'
+                ;;
+            upgrade|'')
+                INSTALL_MODE='upgrade'
+                INSTALL_MODE_LABEL='升级'
+                ENV_ACTION='preserve'
+                ;;
+            overwrite)
+                INSTALL_MODE='overwrite'
+                INSTALL_MODE_LABEL='覆盖安装'
+                ENV_ACTION='regenerate'
+                ;;
+            exit)
+                info "已退出安装程序"
+                exit 0
+                ;;
+            *)
+                error "非交互模式下 INSTALL_MODE/SAFELINE_INSTALL_MODE 仅支持: new、upgrade、overwrite、exit"
+                exit 1
+                ;;
+        esac
+        info "非交互模式，已选择安装模式: $INSTALL_MODE_LABEL"
+        return 0
+    fi
+
+    echo "请选择安装模式:"
+    echo "  1) 新安装"
+    echo "  2) 升级"
+    echo "  3) 覆盖安装"
+    echo "  4) 退出"
+
+    while true; do
+        read -r -p "请输入选项 [1-4]: " mode_choice
+        case "$mode_choice" in
+            1)
+                INSTALL_MODE='new'
+                INSTALL_MODE_LABEL='新安装'
+                ENV_ACTION='create_if_missing'
+                break
+                ;;
+            2)
+                INSTALL_MODE='upgrade'
+                INSTALL_MODE_LABEL='升级'
+                ENV_ACTION='preserve'
+                break
+                ;;
+            3)
+                INSTALL_MODE='overwrite'
+                INSTALL_MODE_LABEL='覆盖安装'
+                ENV_ACTION='regenerate'
+                break
+                ;;
+            4)
+                info "已退出安装程序"
+                exit 0
+                ;;
+            *)
+                warn "无效选项，请输入 1-4"
+                ;;
+        esac
+    done
+
+    info "已选择安装模式: $INSTALL_MODE_LABEL"
+}
+
+installation_exists() {
+    local install_root="/opt/safeline-waf"
+
+    if [ -f "$install_root/.env" ]; then
+        return 0
+    fi
+
+    if [ -d "$install_root/.git" ] || [ -d "$install_root/nginx" ] || [ -d "$install_root/admin" ] || [ -d "$install_root/config" ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 # docker compose 兼容包装：优先 v2 插件，回退 v1 独立命令
@@ -169,6 +269,12 @@ install_dependencies() {
 clone_source() {
     info "下载SafeLine WAF源码..."
 
+    if [ "$INSTALL_MODE" = "new" ] && installation_exists; then
+        error "检测到现有安装或源码目录，不能以“新安装”模式继续"
+        error "请重新运行脚本并选择“升级”或“覆盖安装”"
+        exit 1
+    fi
+
     mkdir -p /opt/safeline-waf
     cd /opt/safeline-waf
 
@@ -286,22 +392,53 @@ prepare_env() {
     local admin_password=''
     local admin_password_confirm=''
     local is_interactive=0
+    local env_has_required_fields=0
 
     info "准备环境变量文件..."
 
+    ENV_WAS_REGENERATED=0
+
     if [ -f "$env_file" ]; then
+        ENV_EXISTED_BEFORE=1
         chmod 600 "$env_file"
 
-        if ! grep -q '^JWT_SECRET=' "$env_file" || \
-           ! grep -q '^REDIS_PASSWORD=' "$env_file" || \
-           ! grep -q '^ADMIN_USERNAME=' "$env_file" || \
-           ! grep -q '^ADMIN_PASSWORD_HASH=' "$env_file"; then
-            error "检测到现有 .env 缺少必要字段（JWT_SECRET、REDIS_PASSWORD、ADMIN_USERNAME、ADMIN_PASSWORD_HASH），请先修复后再运行安装脚本"
+        if grep -q '^JWT_SECRET=' "$env_file" && \
+           grep -q '^REDIS_PASSWORD=' "$env_file" && \
+           grep -q '^ADMIN_USERNAME=' "$env_file" && \
+           grep -q '^ADMIN_PASSWORD_HASH=' "$env_file"; then
+            env_has_required_fields=1
+        fi
+    fi
+
+    if [ "$ENV_ACTION" = "create_if_missing" ]; then
+        if [ "$ENV_EXISTED_BEFORE" -eq 1 ] || installation_exists; then
+            error "检测到现有安装痕迹，不能以“新安装”模式继续"
+            error "请重新运行脚本并选择“升级”或“覆盖安装”"
+            exit 1
+        fi
+    fi
+
+    if [ "$ENV_ACTION" = "preserve" ]; then
+        if [ "$ENV_EXISTED_BEFORE" -eq 1 ] && [ "$env_has_required_fields" -eq 1 ]; then
+            info "升级模式：保留现有 .env、JWT_SECRET、REDIS_PASSWORD 和管理员凭据"
+            return 0
+        fi
+
+        if [ "$ENV_EXISTED_BEFORE" -eq 1 ] && [ "$env_has_required_fields" -eq 0 ]; then
+            error "检测到现有 .env 缺少必要字段（JWT_SECRET、REDIS_PASSWORD、ADMIN_USERNAME、ADMIN_PASSWORD_HASH）"
+            error "请先手动修复 .env，或重新运行脚本并选择“覆盖安装”"
             exit 1
         fi
 
-        info "检测到现有 .env，保留现有密钥和管理员凭据"
-        return 0
+        info "升级模式：未检测到 .env，将执行缺失 .env 的升级初始化"
+    fi
+
+    if [ "$ENV_ACTION" = "regenerate" ]; then
+        if [ "$ENV_EXISTED_BEFORE" -eq 1 ]; then
+            warn "覆盖安装将重建 .env 中的管理员凭据，旧管理员密码将失效"
+        else
+            info "覆盖安装模式：未检测到现有 .env，将按全新凭据初始化"
+        fi
     fi
 
     if [ -t 0 ] && [ -t 1 ]; then
@@ -412,6 +549,10 @@ prepare_env() {
         prepare_non_interactive_admin_credentials
     fi
 
+    if [ "$ENV_ACTION" = "preserve" ] && [ "$ENV_EXISTED_BEFORE" -eq 0 ]; then
+        info "已按升级初始化流程创建新的管理员凭据"
+    fi
+
     jwt_secret=$(openssl rand -base64 48 | tr -d '\n')
     redis_password=$(openssl rand -hex 32)
 
@@ -424,6 +565,7 @@ ADMIN_PASSWORD_HASH=$admin_password_hash
 EOF
     chmod 600 "$env_file"
 
+    ENV_WAS_REGENERATED=1
     admin_password=''
     admin_password_confirm=''
 
@@ -632,6 +774,7 @@ show_info() {
     echo -e "${GREEN}SafeLine WAF 安装完成${NC}"
     echo "============================================================="
     echo
+    echo -e "安装模式: ${GREEN}$INSTALL_MODE_LABEL${NC}"
     echo -e "管理界面: ${GREEN}http://$ip:$admin_port${NC}"
     echo -e "管理用户名: ${GREEN}$admin_username${NC}"
     echo -e ".env 文件: ${GREEN}/opt/safeline-waf/.env${NC}"
@@ -641,8 +784,14 @@ show_info() {
         echo -e "临时管理员密码: ${YELLOW}$ENV_GENERATED_TEMP_PASSWORD${NC}"
         echo "这是一次性引导密码，请首次登录后立即修改！"
         echo
+    elif [ "$INSTALL_MODE" = "upgrade" ] && [ "$ENV_WAS_REGENERATED" -eq 0 ]; then
+        echo "本次升级保留了现有管理员凭据，密码未被重置，请使用升级前的密码登录。"
+        echo
+    elif [ "$ENV_WAS_REGENERATED" -eq 1 ]; then
+        echo "管理员密码已重置为本次安装设置的新密码。"
+        echo
     else
-        echo "请使用安装时设置的管理员密码登录。"
+        echo "请使用现有管理员密码登录。"
         echo
     fi
 
@@ -659,7 +808,8 @@ main() {
     echo "                     SafeLine WAF 安装程序                    "
     echo "============================================================="
     echo
-    
+
+    select_install_mode
     check_system
     install_dependencies
     clone_source
