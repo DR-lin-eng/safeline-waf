@@ -196,11 +196,11 @@ clone_source() {
 # 配置文件准备
 prepare_config() {
     info "准备配置文件..."
-    
+
     # 创建必要的目录
     mkdir -p /opt/safeline-waf/config/sites
     mkdir -p /opt/safeline-waf/logs
-    
+
     # 检查默认配置文件是否存在
     if [ ! -f "/opt/safeline-waf/config/default_config.json" ]; then
         # 创建默认配置
@@ -257,11 +257,46 @@ prepare_config() {
 }
 EOF
     fi
-    
+
     # 配置文件权限
     chmod -R 755 /opt/safeline-waf/config
-    
+
     success "配置文件准备完成"
+}
+
+# 环境变量文件准备
+prepare_env() {
+    local env_file="/opt/safeline-waf/.env"
+    local default_admin_password_hash='$$2a$$12$$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LnITHEhV1xnSqxSyu'
+    local jwt_secret
+    local redis_password
+
+    info "准备环境变量文件..."
+
+    if [ -f "$env_file" ]; then
+        chmod 600 "$env_file"
+        info "检测到现有 .env，保留现有密钥"
+        return 0
+    fi
+
+    if ! command -v openssl &>/dev/null; then
+        error "未找到 openssl，无法生成安全随机密钥"
+        exit 1
+    fi
+
+    jwt_secret=$(openssl rand -base64 48 | tr -d '\n')
+    redis_password=$(openssl rand -hex 32)
+
+    umask 177
+    cat > "$env_file" <<EOF
+JWT_SECRET=$jwt_secret
+REDIS_PASSWORD=$redis_password
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=$default_admin_password_hash
+EOF
+    chmod 600 "$env_file"
+
+    success "已生成 $env_file"
 }
 
 # 构建并启动Docker容器
@@ -455,10 +490,10 @@ show_info() {
     echo "============================================================="
     echo
     echo -e "管理界面: ${GREEN}http://$IP:8080${NC}"
-    echo -e "默认账号: ${GREEN}admin${NC}"
-    echo -e "默认密码: ${GREEN}safeline123${NC}"
+    echo -e "管理用户名: ${GREEN}admin${NC}"
+    echo -e ".env 文件: ${GREEN}/opt/safeline-waf/.env${NC}"
     echo
-    echo "请立即登录并修改默认密码！"
+    echo "请立即登录并修改管理员密码！"
     echo
     echo "如需添加站点，请在管理界面操作。"
     echo "如需查看日志，请使用: docker logs safeline-waf-nginx"
@@ -478,6 +513,7 @@ main() {
     install_dependencies
     clone_source
     prepare_config
+    prepare_env
     build_and_run
     check_status
     show_info

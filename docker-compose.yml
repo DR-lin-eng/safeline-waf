@@ -15,7 +15,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-safeline-redis-secret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       # 集群配置
       - NODE_ID=${NODE_ID:-node-1}
       - NODE_ROLE=${NODE_ROLE:-worker}
@@ -38,7 +38,7 @@ services:
     container_name: safeline-waf-redis
     command: >
       redis-server
-      --requirepass ${REDIS_PASSWORD:-safeline-redis-secret}
+      --requirepass ${REDIS_PASSWORD}
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --save 900 1
@@ -50,7 +50,7 @@ services:
     networks:
       - safeline-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-safeline-redis-secret}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -68,16 +68,16 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-safeline-redis-secret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - NGINX_RELOAD_URL=http://nginx:80/_reload
       - NGINX_METRICS_URL=http://nginx:80/_metrics
       - NGINX_CONF_DIR=/nginx/conf.d
       # 认证配置 - 生产环境必须修改这些值！
-      - JWT_SECRET=${JWT_SECRET:-change-this-jwt-secret-in-production}
+      - JWT_SECRET=${JWT_SECRET}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       # 密码哈希: 使用 node -e "require('bcryptjs').hash('yourpassword',12).then(console.log)" 生成
       # 默认密码: SafeLine@2024 (生产环境必须修改!)
-      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-$$2a$$12$$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LnITHEhV1xnSqxSyu}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
       - NODE_ENV=${NODE_ENV:-production}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
       # 集群配置
