@@ -26,6 +26,18 @@ success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
+# docker compose 兼容包装：优先 v2 插件，回退 v1 独立命令
+docker_compose() {
+    if docker compose version &>/dev/null 2>&1; then
+        docker compose "$@"
+    elif command -v docker-compose &>/dev/null; then
+        docker-compose "$@"
+    else
+        error "未找到 docker compose 或 docker-compose，请先安装"
+        exit 1
+    fi
+}
+
 # 检查系统
 check_system() {
     info "正在检查系统环境..."
@@ -65,14 +77,14 @@ check_system() {
     
     # 检查系统资源
     MEM_TOTAL=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    MEM_TOTAL_GB=$(echo "scale=1; $MEM_TOTAL/1024/1024" | bc)
-    
+    MEM_TOTAL_GB=$(awk "BEGIN {printf \"%.1f\", $MEM_TOTAL/1024/1024}")
+
     CPU_CORES=$(nproc)
-    
+
     info "系统内存: ${MEM_TOTAL_GB}GB"
     info "CPU核心数: $CPU_CORES"
-    
-    if (( $(echo "$MEM_TOTAL_GB < 1.5" | bc -l) )); then
+
+    if awk "BEGIN {exit !(${MEM_TOTAL_GB} < 1.5)}"; then
         warn "系统内存不足，推荐至少2GB内存运行SafeLine WAF"
         read -p "是否继续? (y/n) " -n 1 -r
         echo
@@ -92,9 +104,21 @@ install_dependencies() {
     
     case $OS in
         "Ubuntu"|"Debian GNU/Linux")
+            # 移除与 Docker CE 冲突的旧包
+            apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
             apt-get update
             apt-get install -y curl wget git build-essential libpcre3-dev libssl-dev zlib1g-dev \
-                               redis-server docker.io docker-compose
+                               redis-server
+            # 安装 Docker CE（若未安装）
+            if ! command -v docker &>/dev/null; then
+                curl -fsSL https://get.docker.com | sh
+            fi
+            # 安装 docker-compose（优先插件，回退独立二进制）
+            if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null 2>&1; then
+                apt-get install -y docker-compose-plugin 2>/dev/null || \
+                curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+                     -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose
+            fi
             ;;
         "CentOS Linux"|"Rocky Linux"|"AlmaLinux")
             yum -y install epel-release
@@ -109,9 +133,11 @@ install_dependencies() {
             warn "未知操作系统，尝试安装通用依赖..."
             # 通用安装尝试
             if command -v apt-get &> /dev/null; then
+                apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
                 apt-get update
                 apt-get install -y curl wget git build-essential libpcre3-dev libssl-dev zlib1g-dev \
-                                   redis-server docker.io docker-compose
+                                   redis-server
+                command -v docker &>/dev/null || curl -fsSL https://get.docker.com | sh
             elif command -v yum &> /dev/null; then
                 yum -y install epel-release
                 yum -y install curl wget git gcc gcc-c++ make pcre-devel openssl-devel zlib-devel \
@@ -246,10 +272,10 @@ build_and_run() {
     cd /opt/safeline-waf
     
     # 停止可能已经运行的容器
-    docker-compose down
-    
+    docker_compose down
+
     # 构建并启动
-    docker-compose up -d --build
+    docker_compose up -d --build
     
     if [ $? -ne 0 ]; then
         error "Docker构建或启动失败"
@@ -266,7 +292,7 @@ check_status() {
     sleep 5
     
     # 检查容器状态
-    CONTAINERS=$(docker-compose ps -q)
+    CONTAINERS=$(docker_compose ps -q)
     
     if [ -z "$CONTAINERS" ]; then
         error "没有找到运行中的容器"
