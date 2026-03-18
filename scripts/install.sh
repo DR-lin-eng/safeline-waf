@@ -165,32 +165,31 @@ install_dependencies() {
 # 克隆源码
 clone_source() {
     info "下载SafeLine WAF源码..."
-    
-    # 创建目录
+
     mkdir -p /opt/safeline-waf
     cd /opt/safeline-waf
-    
-    # 如果是通过脚本方式安装而非Git，直接复制文件
-    if [ -d "./nginx" ] && [ -d "./admin" ] && [ -d "./config" ]; then
-        info "检测到本地源码，跳过下载"
-    else
-        # 这里使用GitHub仓库，实际部署时替换为您的仓库
-        git clone https://github.com/DR-lin-eng/safeline-waf.git .
-        
-        if [ $? -ne 0 ]; then
-            warn "Git克隆失败，尝试使用备用方法下载..."
-            # 备用下载方法
-            wget -O safeline-waf.tar.gz https://your-server.com/downloads/safeline-waf.tar.gz
-            tar -xzf safeline-waf.tar.gz
-            rm safeline-waf.tar.gz
-            
-            if [ $? -ne 0 ]; then
-                error "源码下载失败"
-                exit 1
+
+    if [ -d ".git" ]; then
+        # 已是 Git 仓库 → 拉取最新代码（确保新增文件如 docker-compose.prod.yml 到位）
+        info "检测到 Git 仓库，执行 git pull..."
+        git pull origin main || warn "git pull 失败，继续使用当前版本"
+    elif [ -d "./nginx" ] && [ -d "./admin" ] && [ -d "./config" ]; then
+        # 非 Git 仓库但文件已存在 → 补充下载缺失的关键文件
+        info "检测到本地源码，补全缺失文件..."
+        for f in docker-compose.prod.yml docker-compose.yml; do
+            if [ ! -f "$f" ]; then
+                curl -fsSL "https://raw.githubusercontent.com/DR-lin-eng/safeline-waf/main/$f" -o "$f" \
+                    || warn "无法下载 $f，部分功能可能受限"
             fi
+        done
+    else
+        git clone https://github.com/DR-lin-eng/safeline-waf.git .
+        if [ $? -ne 0 ]; then
+            error "源码下载失败"
+            exit 1
         fi
     fi
-    
+
     success "源码准备完成"
 }
 
@@ -271,18 +270,34 @@ build_and_run() {
 
     cd /opt/safeline-waf
 
-    # 停止可能已经运行的容器
-    docker_compose -f docker-compose.prod.yml down 2>/dev/null || true
+    PROD_COMPOSE="/opt/safeline-waf/docker-compose.prod.yml"
 
-    # 优先使用预构建镜像（docker-compose.prod.yml），无需本地编译
-    info "拉取预构建多架构镜像（amd64/arm64）..."
-    SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f docker-compose.prod.yml pull
+    # 若 prod compose 文件缺失，尝试从 GitHub 补充下载
+    if [ ! -f "$PROD_COMPOSE" ]; then
+        warn "docker-compose.prod.yml 不存在，尝试下载..."
+        curl -fsSL "https://raw.githubusercontent.com/DR-lin-eng/safeline-waf/main/docker-compose.prod.yml" \
+             -o "$PROD_COMPOSE" || true
+    fi
 
-    if [ $? -ne 0 ]; then
-        warn "拉取镜像失败，回退到本地编译..."
-        docker_compose up -d --build
+    if [ -f "$PROD_COMPOSE" ]; then
+        # 停止旧容器
+        docker_compose -f "$PROD_COMPOSE" down 2>/dev/null || true
+
+        # 拉取预构建多架构镜像，无需本地编译
+        info "拉取预构建多架构镜像（amd64/arm64）..."
+        SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$PROD_COMPOSE" pull
+
+        if [ $? -eq 0 ]; then
+            SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f "$PROD_COMPOSE" up -d
+        else
+            warn "拉取镜像失败，回退到本地编译..."
+            docker_compose down 2>/dev/null || true
+            docker_compose up -d --build
+        fi
     else
-        SAFELINE_TAG=${SAFELINE_TAG:-main} docker_compose -f docker-compose.prod.yml up -d
+        warn "docker-compose.prod.yml 仍不可用，使用本地编译..."
+        docker_compose down 2>/dev/null || true
+        docker_compose up -d --build
     fi
 
     if [ $? -ne 0 ]; then
@@ -300,7 +315,10 @@ check_status() {
     sleep 5
     
     # 检查容器状态
-    CONTAINERS=$(docker_compose -f docker-compose.prod.yml ps -q)
+    PROD_COMPOSE="/opt/safeline-waf/docker-compose.prod.yml"
+    COMPOSE_F=""
+    [ -f "$PROD_COMPOSE" ] && COMPOSE_F="-f $PROD_COMPOSE"
+    CONTAINERS=$(docker_compose $COMPOSE_F ps -q)
     
     if [ -z "$CONTAINERS" ]; then
         error "没有找到运行中的容器"
