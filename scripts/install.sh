@@ -9,6 +9,9 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
+ENV_GENERATED_TEMP_PASSWORD=''
+ENV_TEMP_PASSWORD_IS_GENERATED=0
+
 # 输出信息函数
 info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -195,10 +198,19 @@ clone_source() {
 
 # 配置文件准备
 prepare_config() {
+    local backend_uid=10001
+    local backend_gid=10001
+    local backend_writable_paths=(
+        /opt/safeline-waf/config
+        /opt/safeline-waf/nginx/conf.d
+    )
+
     info "准备配置文件..."
 
     # 创建必要的目录
     mkdir -p /opt/safeline-waf/config/sites
+    mkdir -p /opt/safeline-waf/config/certs
+    mkdir -p /opt/safeline-waf/nginx/conf.d
     mkdir -p /opt/safeline-waf/logs
 
     # 检查默认配置文件是否存在
@@ -258,8 +270,11 @@ prepare_config() {
 EOF
     fi
 
-    # 配置文件权限
-    chmod -R 755 /opt/safeline-waf/config
+    # 修复 backend 需要写入的宿主机挂载目录权限
+    for path in "${backend_writable_paths[@]}"; do
+        chown -R "${backend_uid}:${backend_gid}" "$path"
+        chmod -R u+rwX,go+rX "$path"
+    done
 
     success "配置文件准备完成"
 }
@@ -267,21 +282,137 @@ EOF
 # 环境变量文件准备
 prepare_env() {
     local env_file="/opt/safeline-waf/.env"
-    local default_admin_password_hash='$$2a$$12$$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LnITHEhV1xnSqxSyu'
     local jwt_secret
     local redis_password
+    local admin_username=''
+    local admin_password_hash=''
+    local admin_password=''
+    local admin_password_confirm=''
+    local is_interactive=0
 
     info "准备环境变量文件..."
 
     if [ -f "$env_file" ]; then
         chmod 600 "$env_file"
-        info "检测到现有 .env，保留现有密钥"
+
+        if ! grep -q '^JWT_SECRET=' "$env_file" || \
+           ! grep -q '^REDIS_PASSWORD=' "$env_file" || \
+           ! grep -q '^ADMIN_USERNAME=' "$env_file" || \
+           ! grep -q '^ADMIN_PASSWORD_HASH=' "$env_file"; then
+            error "检测到现有 .env 缺少必要字段（JWT_SECRET、REDIS_PASSWORD、ADMIN_USERNAME、ADMIN_PASSWORD_HASH），请先修复后再运行安装脚本"
+            exit 1
+        fi
+
+        info "检测到现有 .env，保留现有密钥和管理员凭据"
         return 0
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        is_interactive=1
     fi
 
     if ! command -v openssl &>/dev/null; then
         error "未找到 openssl，无法生成安全随机密钥"
         exit 1
+    fi
+
+    hash_password() {
+        local plain_password="$1"
+        local hashed_password=''
+
+        if command -v docker &>/dev/null; then
+            hashed_password=$(docker run --rm -i node:20-alpine node -e "const bcrypt=require('bcryptjs');let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>data+=c);process.stdin.on('end',async()=>{process.stdout.write(await bcrypt.hash(data.replace(/\r?\n$/, ''), 12));});" <<< "$plain_password" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$hashed_password" ]; then
+                printf '%s\n' "$hashed_password"
+                return 0
+            fi
+            warn "使用 Docker 生成 bcrypt 哈希失败，尝试本机 node 兜底"
+        fi
+
+        if command -v node &>/dev/null; then
+            hashed_password=$(node -e "const fs=require('fs');const path=require('path');const candidates=['/opt/safeline-waf/admin/backend/node_modules/bcryptjs','/opt/safeline-waf/admin/backend/node_modules','/opt/safeline-waf/node_modules/bcryptjs','bcryptjs'];let bcrypt=null;for(const candidate of candidates){try{if(candidate.endsWith('/node_modules')){bcrypt=require(path.join(candidate,'bcryptjs'));}else{bcrypt=require(candidate);}break;}catch(_) {}}if(!bcrypt){console.error('missing bcryptjs');process.exit(1);}const password=fs.readFileSync(0,'utf8').replace(/\r?\n$/, '');bcrypt.hash(password,12).then(hash=>process.stdout.write(hash)).catch(err=>{console.error(err.message);process.exit(1);});" <<< "$plain_password" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$hashed_password" ]; then
+                printf '%s\n' "$hashed_password"
+                return 0
+            fi
+        fi
+
+        return 1
+    }
+
+    collect_interactive_admin_credentials() {
+        while true; do
+            read -r -p "请输入管理员用户名 [admin]: " admin_username
+            admin_username=${admin_username:-admin}
+            if [ -n "$admin_username" ]; then
+                break
+            fi
+            warn "管理员用户名不能为空"
+        done
+
+        while true; do
+            read -r -s -p "请输入管理员密码: " admin_password
+            echo
+            if [ -z "$admin_password" ]; then
+                warn "管理员密码不能为空"
+                continue
+            fi
+            if [ ${#admin_password} -lt 12 ]; then
+                warn "管理员密码长度至少为 12 位"
+                continue
+            fi
+
+            read -r -s -p "请再次输入管理员密码: " admin_password_confirm
+            echo
+            if [ "$admin_password" != "$admin_password_confirm" ]; then
+                warn "两次输入的密码不一致，请重新输入"
+                continue
+            fi
+
+            admin_password_hash=$(hash_password "$admin_password")
+            if [ -z "$admin_password_hash" ]; then
+                error "无法生成管理员密码哈希，请确认 Docker 或 Node 环境可用"
+                exit 1
+            fi
+
+            admin_password=''
+            admin_password_confirm=''
+            break
+        done
+    }
+
+    prepare_non_interactive_admin_credentials() {
+        admin_username=${ADMIN_USERNAME:-admin}
+        admin_password_hash=${ADMIN_PASSWORD_HASH:-}
+        admin_password=${ADMIN_PASSWORD:-}
+
+        if [ -n "$admin_password_hash" ]; then
+            return 0
+        fi
+
+        if [ -n "$admin_password" ]; then
+            admin_password_hash=$(hash_password "$admin_password")
+            admin_password=''
+            if [ -z "$admin_password_hash" ]; then
+                error "已提供 ADMIN_PASSWORD，但无法生成 bcrypt 哈希，请确认 Docker 或 Node 环境可用"
+                exit 1
+            fi
+            return 0
+        fi
+
+        ENV_GENERATED_TEMP_PASSWORD=$(openssl rand -base64 18 | tr -d '\n' | tr '/+' 'AB')
+        ENV_TEMP_PASSWORD_IS_GENERATED=1
+        admin_password_hash=$(hash_password "$ENV_GENERATED_TEMP_PASSWORD")
+        if [ -z "$admin_password_hash" ]; then
+            error "无法为非交互安装生成临时管理员密码哈希，请确认 Docker 或 Node 环境可用"
+            exit 1
+        fi
+    }
+
+    if [ "$is_interactive" -eq 1 ]; then
+        collect_interactive_admin_credentials
+    else
+        prepare_non_interactive_admin_credentials
     fi
 
     jwt_secret=$(openssl rand -base64 48 | tr -d '\n')
@@ -291,10 +422,13 @@ prepare_env() {
     cat > "$env_file" <<EOF
 JWT_SECRET=$jwt_secret
 REDIS_PASSWORD=$redis_password
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD_HASH=$default_admin_password_hash
+ADMIN_USERNAME=$admin_username
+ADMIN_PASSWORD_HASH=$admin_password_hash
 EOF
     chmod 600 "$env_file"
+
+    admin_password=''
+    admin_password_confirm=''
 
     success "已生成 $env_file"
 }
@@ -482,19 +616,39 @@ check_status() {
 
 # 显示安装信息
 show_info() {
-    IP=$(hostname -I | awk '{print $1}')
-    
+    local env_file="/opt/safeline-waf/.env"
+    local ip
+    local admin_port
+    local admin_username
+
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$ip" ] || ip="127.0.0.1"
+
+    admin_port=$(grep '^ADMIN_PORT=' "$env_file" 2>/dev/null | tail -n 1 | cut -d'=' -f2-)
+    admin_port=${admin_port:-8080}
+
+    admin_username=$(grep '^ADMIN_USERNAME=' "$env_file" 2>/dev/null | tail -n 1 | cut -d'=' -f2-)
+    admin_username=${admin_username:-admin}
+
     echo
     echo "============================================================="
     echo -e "${GREEN}SafeLine WAF 安装完成${NC}"
     echo "============================================================="
     echo
-    echo -e "管理界面: ${GREEN}http://$IP:8080${NC}"
-    echo -e "管理用户名: ${GREEN}admin${NC}"
+    echo -e "管理界面: ${GREEN}http://$ip:$admin_port${NC}"
+    echo -e "管理用户名: ${GREEN}$admin_username${NC}"
     echo -e ".env 文件: ${GREEN}/opt/safeline-waf/.env${NC}"
     echo
-    echo "请立即登录并修改管理员密码！"
-    echo
+
+    if [ "$ENV_TEMP_PASSWORD_IS_GENERATED" -eq 1 ] && [ -n "$ENV_GENERATED_TEMP_PASSWORD" ]; then
+        echo -e "临时管理员密码: ${YELLOW}$ENV_GENERATED_TEMP_PASSWORD${NC}"
+        echo "这是一次性引导密码，请首次登录后立即修改！"
+        echo
+    else
+        echo "请使用安装时设置的管理员密码登录。"
+        echo
+    fi
+
     echo "如需添加站点，请在管理界面操作。"
     echo "如需查看日志，请使用: docker logs safeline-waf-nginx"
     echo

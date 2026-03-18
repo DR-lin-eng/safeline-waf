@@ -136,6 +136,19 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+首次安装时，脚本会引导设置管理员用户名和密码，并生成 `.env` 中的安全密钥。
+如果目标目录下已存在 `.env`，脚本会保留现有 `JWT_SECRET`、`REDIS_PASSWORD`、`ADMIN_USERNAME` 和 `ADMIN_PASSWORD_HASH`，适用于重装或升级场景。
+
+非交互安装可通过环境变量预置管理员凭据：
+
+```bash
+ADMIN_USERNAME=security-admin \
+ADMIN_PASSWORD='ChangeMeNow!123' \
+sudo -E ./install.sh
+```
+
+也可以直接提供 `ADMIN_PASSWORD_HASH`，脚本将优先使用该哈希值写入 `.env`。
+
 ### 使用 Docker Compose 手动部署
 
 1. 克隆代码仓库：
@@ -162,16 +175,16 @@ docker-compose up -d
 
 访问 `http://您的服务器IP:8080` 登录管理界面。
 
-默认管理员账号：
-- 用户名：admin
-- 密码：safeline123
+- 使用首次安装时设置的管理员用户名和密码登录。
+- 若为非交互安装，可通过 `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH`，或 `ADMIN_USERNAME` + `ADMIN_PASSWORD` 预置凭据。
+- 若非交互安装且未提供管理员凭据，安装脚本会生成一次性临时密码，并仅在安装完成时显示一次；首次登录后请立即修改。
 
 ## 配置指南
 
 ### 通过管理界面配置
 
 1. 登录管理界面 `http://您的服务器IP:8080`
-2. 首次登录后，建议修改默认密码
+2. 使用安装阶段设置的管理员凭据登录；若脚本生成了临时密码，请首次登录后立即修改
 3. 在"站点管理"中添加新站点：
    - 填写域名
    - 设置后端服务器地址
