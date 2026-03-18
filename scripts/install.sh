@@ -198,8 +198,6 @@ clone_source() {
 
 # 配置文件准备
 prepare_config() {
-    local backend_uid=10001
-    local backend_gid=10001
     local backend_writable_paths=(
         /opt/safeline-waf/config
         /opt/safeline-waf/nginx/conf.d
@@ -270,10 +268,9 @@ prepare_config() {
 EOF
     fi
 
-    # 修复 backend 需要写入的宿主机挂载目录权限
+    # 挂载目录需兼容新旧 backend 镜像中的运行用户，避免因 UID 不一致导致启动失败
     for path in "${backend_writable_paths[@]}"; do
-        chown -R "${backend_uid}:${backend_gid}" "$path"
-        chmod -R u+rwX,go+rX "$path"
+        chmod -R u+rwX,go+rwX "$path"
     done
 
     success "配置文件准备完成"
