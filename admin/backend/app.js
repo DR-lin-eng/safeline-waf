@@ -746,6 +746,10 @@ function generateSelfSignedCert(domain, certHostPath, keyHostPath) {
     ];
     execFile('openssl', args, { timeout: 30000 }, (err) => {
       if (err) {
+        if (err.code === 'ENOENT') {
+          reject(new Error('OpenSSL is not installed in the admin-backend container'));
+          return;
+        }
         reject(new Error(`Failed to generate self-signed certificate: ${err.message}`));
       } else {
         resolve();
