@@ -444,7 +444,7 @@ function normalizeAntiBypassConfig(rawConfig) {
   const antiBypassInput = isObject(rawConfig && rawConfig.anti_bypass) ? rawConfig.anti_bypass : {};
 
   return {
-    origin_proxy_only_default: toBooleanOrDefault(antiBypassInput.origin_proxy_only_default, true),
+    origin_proxy_only_default: toBooleanOrDefault(antiBypassInput.origin_proxy_only_default, false),
     slider_step_up_on_high_risk: toBooleanOrDefault(antiBypassInput.slider_step_up_on_high_risk, true),
     slider_verification_ttl: normalizeInteger(antiBypassInput.slider_verification_ttl, 300, 60, 3600),
     captcha_verification_ttl: normalizeInteger(antiBypassInput.captcha_verification_ttl, 900, 60, 7200),

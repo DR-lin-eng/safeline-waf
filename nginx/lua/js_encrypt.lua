@@ -29,9 +29,27 @@ function _M.get_obfuscated_js()
     
     if config_json then
         local success, parsed_config = pcall(cjson.decode, config_json)
-        if success then
-            config = parsed_config
+        if success and type(parsed_config) == "table" then
+            for key, value in pairs(parsed_config) do
+                config[key] = value
+            end
         end
+    end
+
+    config.renew_interval = tonumber(config.renew_interval) or 3600
+    if config.renew_interval < 60 then
+        config.renew_interval = 60
+    end
+    if config.renew_interval > 86400 then
+        config.renew_interval = 86400
+    end
+
+    config.variable_name_length = tonumber(config.variable_name_length) or 8
+    if config.variable_name_length < 4 then
+        config.variable_name_length = 4
+    end
+    if config.variable_name_length > 32 then
+        config.variable_name_length = 32
     end
     
     -- 检查缓存中是否有混淆过的代码

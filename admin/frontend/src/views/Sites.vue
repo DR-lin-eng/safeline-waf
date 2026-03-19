@@ -536,8 +536,8 @@ export default {
           sampling_rate: 0.01,
           log_sample_rate: 0.01,
           anomaly_threshold: 5.0,
-          js_encryption_enabled: true,
-          prevent_browser_f12: true,
+          js_encryption_enabled: false,
+          prevent_browser_f12: false,
           honeypot_enabled: true,
           auto_blacklist_enabled: true,
           request_logging_enabled: true,
@@ -545,7 +545,7 @@ export default {
           request_body_max_bytes: 32768,
           request_field_max_len: 4096,
           ddos_reverify_window: 120,
-          origin_proxy_only_enabled: true
+          origin_proxy_only_enabled: false
         },
         verification_methods: {
           captcha_enabled: true,
@@ -585,7 +585,7 @@ export default {
     },
     getBackendPortFollowLabel(site) {
       return site.backend_port_follow
-        ? '端口跟随访问协议（HTTP→80 / HTTPS→443）'
+        ? '端口跟随入口端口（只切换 80/443，不切换 http/https）'
         : '固定使用回源地址中的端口';
     },
     openAddSiteModal() {

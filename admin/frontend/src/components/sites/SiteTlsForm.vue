@@ -8,6 +8,7 @@
           v-model="site.tls.cert_path"
           type="text"
           class="form-control"
+          readonly
           required
         >
       </div>
@@ -18,6 +19,7 @@
           v-model="site.tls.key_path"
           type="text"
           class="form-control"
+          readonly
           required
         >
       </div>
@@ -40,7 +42,7 @@
 
     <small class="form-text text-muted mb-3">
       证书文件默认存放于 <code>./config/certs/</code>，容器内路径为 <code>/usr/local/openresty/nginx/conf/config/certs/</code>。
-      如未上传证书但开启 HTTPS，系统会按当前域名自动生成自签名证书。
+      保存站点时会始终按当前域名管理证书文件名；如未上传证书但开启 HTTPS，系统会自动生成当前域名的自签名证书。
     </small>
 
     <div class="alert alert-info py-2" v-if="!canUpload">

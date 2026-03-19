@@ -33,12 +33,21 @@ ngx.header["Server"] = nil
 ngx.header["X-Powered-By"] = nil
 
 -- 对HTML响应注入JS加密或F12防护
-local content_type = ngx.header.content_type
+local content_type = ngx.header.content_type or ngx.header["Content-Type"]
+local content_encoding = ngx.header["Content-Encoding"]
 if content_type and content_type:find("text/html", 1, true) then
     if ngx.ctx.js_encryption or ngx.ctx.prevent_f12 then
+        local encoding = type(content_encoding) == "string" and content_encoding:lower() or ""
+        if encoding ~= "" and encoding ~= "identity" then
+            ngx.ctx.modify_response = nil
+            ngx.log(ngx.WARN, "[header_filter] Skip HTML rewrite for encoded response: ", encoding)
+            return
+        end
+
         ngx.ctx.modify_response = true
         ngx.header["Content-Length"] = nil
         ngx.header["ETag"] = nil
         ngx.header["Last-Modified"] = nil
+        ngx.header["Content-Encoding"] = nil
     end
 end

@@ -27,8 +27,8 @@
       <div class="form-group col-md-4 d-flex align-items-end">
         <div class="form-check mb-2">
           <input :id="portFollowInputId" v-model="site.backend_port_follow" type="checkbox" class="form-check-input">
-          <label class="form-check-label" :for="portFollowInputId">后端端口跟随访问协议</label>
-          <small class="form-text text-muted">启用后，HTTP 请求回源到 80，HTTPS 请求回源到 443，而不是固定使用回源地址中的端口。</small>
+          <label class="form-check-label" :for="portFollowInputId">后端端口跟随入口端口</label>
+          <small class="form-text text-muted">启用后只会改端口，不会改协议。例如回源填 <code>http://origin</code> 时，HTTPS 请求会回源到 <code>http://origin:443</code>。</small>
         </div>
       </div>
     </div>

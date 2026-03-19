@@ -75,7 +75,7 @@
     "shared_dict_scale_per_core": 1.0
   },
   "anti_bypass": {
-    "origin_proxy_only_default": true,
+    "origin_proxy_only_default": false,
     "slider_step_up_on_high_risk": true,
     "slider_verification_ttl": 300,
     "captcha_verification_ttl": 900,
