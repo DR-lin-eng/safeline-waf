@@ -534,6 +534,7 @@ export default {
           traffic_analysis_enabled: true,
           request_sampling_enabled: true,
           sampling_rate: 0.01,
+          log_sample_rate: 0.01,
           anomaly_threshold: 5.0,
           js_encryption_enabled: true,
           prevent_browser_f12: true,
@@ -717,6 +718,7 @@ export default {
       const captchaVerificationTtl = Number(this.currentSite.verification_methods.captcha_verification_ttl);
       const powVerificationTtl = Number(this.currentSite.verification_methods.pow_verification_ttl);
       const ddosReverifyWindow = Number(this.currentSite.protection.ddos_reverify_window);
+      const logSampleRate = Number(this.currentSite.protection.log_sample_rate);
 
       if (!Number.isInteger(ddosReverifyWindow) || ddosReverifyWindow < 10) {
         this.siteFormError = 'DDoS 复验窗口不能小于 10 秒。';
@@ -738,7 +740,13 @@ export default {
         return false;
       }
 
+      if (!Number.isFinite(logSampleRate) || logSampleRate < 0 || logSampleRate > 1) {
+        this.siteFormError = '放行请求采样率必须介于 0 到 1 之间。';
+        return false;
+      }
+
       this.currentSite.protection.ddos_reverify_window = ddosReverifyWindow;
+      this.currentSite.protection.log_sample_rate = logSampleRate;
       this.currentSite.verification_methods.slider_verification_ttl = sliderVerificationTtl;
       this.currentSite.verification_methods.captcha_verification_ttl = captchaVerificationTtl;
       this.currentSite.verification_methods.pow_verification_ttl = powVerificationTtl;
@@ -785,8 +793,18 @@ export default {
         }
       } catch (error) {
         const responseData = error.response && error.response.data ? error.response.data : null;
-        const reloadMessage = responseData && responseData.reload && responseData.reload.message
-          ? ` 重新加载详情：${responseData.reload.message}`
+        const reloadDetail = responseData && responseData.reload
+          ? (
+            responseData.reload.nginx_error
+            || responseData.reload.config_error
+            || (responseData.reload.nginx_detail
+              && responseData.reload.nginx_detail.syntax_test
+              && responseData.reload.nginx_detail.syntax_test.output)
+            || responseData.reload.message
+          )
+          : '';
+        const reloadMessage = reloadDetail
+          ? ` 重新加载详情：${reloadDetail}`
           : '';
         this.siteFormError = (responseData && responseData.message)
           ? `${responseData.message}${reloadMessage}`

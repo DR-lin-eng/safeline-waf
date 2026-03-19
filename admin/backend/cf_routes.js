@@ -35,6 +35,15 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
     return res.status(status).json({ code: status, message: msg, data: null });
   }
 
+  function sanitizeZoneIds(zoneIds, fallback = []) {
+    const source = Array.isArray(zoneIds) ? zoneIds : fallback;
+    return Array.from(new Set(
+      source
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    ));
+  }
+
   // ── GET /cf/config ─────────────────────────────────────────────────────────
   router.get('/cf/config', async (_req, res) => {
     try {
@@ -70,12 +79,19 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       }
 
       const resolvedAuthType = auth_type === 'global_key' ? 'global_key' : 'token';
+      const resolvedAuthEmail = resolvedAuthType === 'global_key'
+        ? String(auth_email || existing.auth_email || '').trim()
+        : '';
+
+      if (resolvedAuthType === 'global_key' && !resolvedAuthEmail) {
+        return fail(res, 400, 'auth_email is required when auth_type is global_key');
+      }
 
       const cfg = {
         api_token_enc,
         auth_type:              resolvedAuthType,
-        auth_email:             resolvedAuthType === 'global_key' ? String(auth_email || existing.auth_email || '').trim() : '',
-        zone_ids:               Array.isArray(zone_ids) ? zone_ids.filter(Boolean) : (existing.zone_ids || []),
+        auth_email:             resolvedAuthEmail,
+        zone_ids:               sanitizeZoneIds(zone_ids, existing.zone_ids || []),
         enabled:                enabled !== undefined ? !!enabled : !!existing.enabled,
         activate_threshold:     Number(activate_threshold)   || existing.activate_threshold   || 50,
         deactivate_threshold:   Number(deactivate_threshold) || existing.deactivate_threshold || 10,

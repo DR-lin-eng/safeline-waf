@@ -243,7 +243,12 @@ class CfShieldWorker {
     const state      = stateRaw ? JSON.parse(stateRaw) : { active: false };
     const cooldownTs = Number(await redis.get('cf:cooldown_until')) || 0;
 
-    const client = new CfApiClient(token, cfg.timeout_ms || 10000);
+    const client = new CfApiClient(
+      token,
+      cfg.timeout_ms || 10000,
+      cfg.auth_type === 'global_key' ? 'global_key' : 'token',
+      cfg.auth_email || ''
+    );
 
     if (!state.active && score >= activateThreshold) {
       // ── ACTIVATE ────────────────────────────────────────────────────────

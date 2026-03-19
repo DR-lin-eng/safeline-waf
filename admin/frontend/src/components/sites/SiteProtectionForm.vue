@@ -32,6 +32,13 @@
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('traffic-analysis')" v-model="site.protection.traffic_analysis_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('traffic-analysis')">流量动态识别</label></div></div>
         </div>
         <div class="form-row">
+          <div class="form-group col-md-4">
+            <label :for="id('log-sample-rate')">放行请求采样率</label>
+            <input :id="id('log-sample-rate')" v-model.number="site.protection.log_sample_rate" :disabled="!site.protection.request_logging_enabled" type="number" class="form-control" min="0" max="1" step="0.01">
+            <small class="form-text text-muted">0 表示仅记录拦截请求，0.01 表示约 1% 的放行请求会进入实时日志。</small>
+          </div>
+        </div>
+        <div class="form-row">
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('request-inspection')" v-model="site.protection.request_content_inspection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('request-inspection')">请求内容检测</label></div></div>
           <div class="form-group col-md-4">
             <label :for="id('request-body-max')">请求体扫描上限 (Bytes)</label>

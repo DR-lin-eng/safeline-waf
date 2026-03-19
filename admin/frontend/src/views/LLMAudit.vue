@@ -313,13 +313,13 @@ export default {
     },
     async loadStats() {
       try {
-        const { data } = await axios.get('/api/llm/stats', { headers: authHeaders() })
+        const { data } = await axios.get('/llm/stats', { headers: authHeaders() })
         if (data.success) this.stats = data.data || {}
       } catch (_) {}
     },
     async loadConfig() {
       try {
-        const { data } = await axios.get('/api/llm/config', { headers: authHeaders() })
+        const { data } = await axios.get('/llm/config', { headers: authHeaders() })
         if (data.success) {
           this.llmConfig = data.data || {}
           this.editConfig = { ...this.llmConfig, api_key: '' }
@@ -332,7 +332,7 @@ export default {
       try {
         const params = { limit: this.pageSize, offset }
         if (this.riskFilter !== 'all') params.risk = this.riskFilter
-        const { data } = await axios.get('/api/llm/verdicts', { headers: authHeaders(), params })
+        const { data } = await axios.get('/llm/verdicts', { headers: authHeaders(), params })
         if (data.success) {
           this.verdicts = data.data.items || []
           this.totalVerdicts = data.data.total || 0
@@ -344,7 +344,7 @@ export default {
       try {
         const payload = { ...this.editConfig }
         if (!payload.api_key) delete payload.api_key
-        const { data } = await axios.put('/api/llm/config', payload, { headers: authHeaders() })
+        const { data } = await axios.put('/llm/config', payload, { headers: authHeaders() })
         if (data.success) {
           this.llmConfig = data.data || {}
           this.showConfigModal = false
@@ -359,7 +359,7 @@ export default {
     async testConnection() {
       this.testing = true
       try {
-        const { data } = await axios.post('/api/llm/test', {}, { headers: authHeaders() })
+        const { data } = await axios.post('/llm/test', {}, { headers: authHeaders() })
         if (data.success && data.data && data.data.connected) {
           this.$root.$emit('toast', { level: 'success', message: '连接成功！' })
         } else {
@@ -375,7 +375,7 @@ export default {
     async queueIp() {
       if (!this.manualIp) return
       try {
-        const { data } = await axios.post('/api/llm/queue', { ip: this.manualIp, reason: 'manual_admin_review' }, { headers: authHeaders() })
+        const { data } = await axios.post('/llm/queue', { ip: this.manualIp, reason: 'manual_admin_review' }, { headers: authHeaders() })
         if (data.success) {
           this.manualIp = ''
           this.$root.$emit('toast', { level: 'success', message: 'IP 已加入审计队列' })
@@ -388,7 +388,7 @@ export default {
     async clearQueue() {
       if (!confirm('确认清空审计队列？')) return
       try {
-        await axios.delete('/api/llm/queue', { headers: authHeaders() })
+        await axios.delete('/llm/queue', { headers: authHeaders() })
         this.$root.$emit('toast', { level: 'success', message: '队列已清空' })
         await this.loadStats()
       } catch (_) {}
@@ -396,7 +396,7 @@ export default {
     async clearVerdicts() {
       if (!confirm('确认清空所有裁决历史？')) return
       try {
-        await axios.delete('/api/llm/verdicts', { headers: authHeaders() })
+        await axios.delete('/llm/verdicts', { headers: authHeaders() })
         this.verdicts = []
         this.totalVerdicts = 0
         this.$root.$emit('toast', { level: 'success', message: '裁决历史已清空' })
@@ -404,7 +404,7 @@ export default {
     },
     async clearVerdict(ip) {
       try {
-        await axios.delete(`/api/llm/verdict/${encodeURIComponent(ip)}`, { headers: authHeaders() })
+        await axios.delete(`/llm/verdict/${encodeURIComponent(ip)}`, { headers: authHeaders() })
         this.verdicts = this.verdicts.filter(v => v.ip !== ip)
       } catch (_) {}
     },

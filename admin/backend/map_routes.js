@@ -7,7 +7,7 @@
  * GET /map/stats         – summary stats for the map header cards
  */
 
-const https = require('https');
+const http = require('http');
 
 // Private / reserved IP ranges – skip geo lookup
 const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|::1$|localhost)/i;
@@ -22,7 +22,7 @@ function batchGeoLookup(ips) {
 
     const body = JSON.stringify(ips.map(ip => ({ query: ip, fields: 'query,country,countryCode,city,lat,lon,status' })));
 
-    const req = https.request({
+    const req = http.request({
       hostname: 'ip-api.com',
       path: '/batch?fields=query,country,countryCode,city,lat,lon,status',
       method: 'POST',
@@ -88,10 +88,13 @@ async function resolveIps(ips, redis) {
     const chunk = needLookup.slice(i, i + 100);
     const geoMap = await batchGeoLookup(chunk);
     for (const ip of chunk) {
-      const geo = geoMap.get(ip) || { country: 'Unknown', countryCode: 'xx', city: '', lat: 0, lon: 0 };
-      result.set(ip, geo);
-      // Cache the result
-      await redis.set(`map:geo:${ip}`, JSON.stringify(geo), 'EX', 86400);
+      const geo = geoMap.get(ip);
+      if (geo) {
+        result.set(ip, geo);
+        await redis.set(`map:geo:${ip}`, JSON.stringify(geo), 'EX', 86400);
+      } else {
+        result.set(ip, { country: 'Unknown', countryCode: 'xx', city: '', lat: 0, lon: 0 });
+      }
     }
   }
 
@@ -107,6 +110,18 @@ module.exports = function mountMapRoutes(router, redis) {
     return res.status(status).json({ code: status, message: msg, data: null });
   }
 
+  function parseRequestLogs(lines) {
+    return (Array.isArray(lines) ? lines : [])
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch (_) {
+          return null;
+        }
+      })
+      .filter((log) => log && log.type === 'request');
+  }
+
   // ── GET /map/attack-data ────────────────────────────────────────────────────
   // Query params:
   //   limit  (default 500, max 2000) – how many recent log entries to scan
@@ -117,7 +132,7 @@ module.exports = function mountMapRoutes(router, redis) {
       const onlyBlocked = req.query.only_blocked !== 'false';
 
       const raw = await redis.lrange('safeline:logs', 0, limit - 1);
-      const logs = raw.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+      const logs = parseRequestLogs(raw);
 
       // Filter and aggregate IP -> count
       const ipCount = new Map();
@@ -198,11 +213,12 @@ module.exports = function mountMapRoutes(router, redis) {
   // Lightweight stats without full geo resolution (uses cached geo only)
   router.get('/map/stats', async (req, res) => {
     try {
+      const onlyBlocked = req.query.only_blocked !== 'false';
       const raw = await redis.lrange('safeline:logs', 0, 499);
-      const logs = raw.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+      const logs = parseRequestLogs(raw);
 
       const blocked = logs.filter(l => l.is_blocked);
-      const total = logs.length;
+      const total = onlyBlocked ? blocked.length : logs.length;
       const totalBlocked = blocked.length;
       const blockRate = total > 0 ? ((totalBlocked / total) * 100).toFixed(1) : '0.0';
 

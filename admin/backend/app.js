@@ -108,7 +108,17 @@ app.use((req, res, next) => {
         ? payload.code
         : res.statusCode;
 
-      return originalJson({ code, message, data: null });
+      const normalizedPayload = { code, message, data: null };
+
+      if (payload && typeof payload === 'object') {
+        ['reload', 'rollback', 'detail', 'details'].forEach((key) => {
+          if (payload[key] !== undefined) {
+            normalizedPayload[key] = payload[key];
+          }
+        });
+      }
+
+      return originalJson(normalizedPayload);
     }
 
     return originalJson(payload);
@@ -413,6 +423,23 @@ function normalizeInteger(value, defaultValue, minValue, maxValue) {
   return normalized;
 }
 
+function normalizeFloat(value, defaultValue, minValue, maxValue) {
+  const normalized = Number.parseFloat(value);
+  if (!Number.isFinite(normalized)) {
+    return defaultValue;
+  }
+
+  if (typeof minValue === 'number' && normalized < minValue) {
+    return minValue;
+  }
+
+  if (typeof maxValue === 'number' && normalized > maxValue) {
+    return maxValue;
+  }
+
+  return normalized;
+}
+
 function normalizeAntiBypassConfig(rawConfig) {
   const antiBypassInput = isObject(rawConfig && rawConfig.anti_bypass) ? rawConfig.anti_bypass : {};
 
@@ -624,9 +651,13 @@ function buildAttackStatusPayload(currentState, previousState) {
 
 function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig) {
   const protectionInput = isObject(siteConfig && siteConfig.protection) ? siteConfig.protection : {};
+  const samplingRate = normalizeFloat(protectionInput.sampling_rate, 0.01, 0, 1);
+  const logSampleRate = normalizeFloat(protectionInput.log_sample_rate, samplingRate, 0, 1);
 
   return {
     ...protectionInput,
+    sampling_rate: samplingRate,
+    log_sample_rate: logSampleRate,
     ddos_reverify_window: normalizeInteger(protectionInput.ddos_reverify_window, 120, 10, 3600),
     origin_proxy_only_enabled: toBooleanOrDefault(
       protectionInput.origin_proxy_only_enabled,
@@ -2274,13 +2305,13 @@ apiRouter.put('/sites/:domain', async (req, res) => {
     if (!reloadResult.success) {
       await restoreTextFile(sitePath, previousSiteRaw);
       await restoreTextFile(nginxConfigPath, previousNginxRaw);
-      return sendError(
-        res,
-        500,
-        reloadResult.message
+      return res.status(500).json({
+        code: 500,
+        message: reloadResult.message
           ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
-          : 'Failed to reload Nginx configuration (rolled back)'
-      );
+          : 'Failed to reload Nginx configuration (rolled back)',
+        reload: reloadResult.detail || null
+      });
     }
 
     return res.json({
@@ -2364,13 +2395,13 @@ apiRouter.delete('/sites/:domain', async (req, res) => {
       if (legacyNginxConfigPath) {
         await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
       }
-      return sendError(
-        res,
-        500,
-        reloadResult.message
+      return res.status(500).json({
+        code: 500,
+        message: reloadResult.message
           ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
-          : 'Failed to reload Nginx configuration (rolled back)'
-      );
+          : 'Failed to reload Nginx configuration (rolled back)',
+        reload: reloadResult.detail || null
+      });
     }
 
     return res.json({
@@ -3295,8 +3326,16 @@ async function triggerNginxReload() {
       };
     }
 
-    const message = payload && typeof payload.message === 'string'
-      ? payload.message
+    const detailMessage = payload && typeof payload === 'object'
+      ? (
+        payload.nginx_error
+        || payload.config_error
+        || (payload.nginx_detail && payload.nginx_detail.syntax_test && payload.nginx_detail.syntax_test.output)
+        || payload.message
+      )
+      : '';
+    const message = detailMessage && String(detailMessage).trim()
+      ? String(detailMessage).trim()
       : `Nginx reload returned HTTP ${response.status}`;
 
     return {
@@ -3457,8 +3496,9 @@ ${proxyPortFollowDirective}${proxySslDirectives}
         proxy_send_timeout 3600;
     }`;
 
-    const httpsListenDirective = 'listen 443 ssl;';
-    const httpsHttp2Directive = tlsConfig.http2_enabled ? '\n    http2 on;' : '';
+    const httpsListenDirective = tlsConfig.http2_enabled
+      ? 'listen 443 ssl http2;'
+      : 'listen 443 ssl;';
     const httpBlock = tlsConfig.redirect_http_to_https
       ? `
 server {
@@ -3476,7 +3516,6 @@ ${sharedDirectives}
     const httpsBlock = `
 server {
     ${httpsListenDirective}
-${httpsHttp2Directive}
     server_name ${domain};
     ssl_certificate ${tlsConfig.cert_path};
     ssl_certificate_key ${tlsConfig.key_path};

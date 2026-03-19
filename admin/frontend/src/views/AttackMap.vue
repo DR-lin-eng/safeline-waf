@@ -236,8 +236,8 @@ export default {
       try {
         const onlyBlocked = this.filter === 'blocked';
         const [mapRes, statsRes] = await Promise.all([
-          axios.get('/api/map/attack-data', { params: { limit: 500, only_blocked: onlyBlocked } }),
-          axios.get('/api/map/stats'),
+          axios.get('/map/attack-data', { params: { limit: 500, only_blocked: onlyBlocked } }),
+          axios.get('/map/stats', { params: { only_blocked: onlyBlocked } }),
         ]);
 
         const mapData = mapRes.data.data || {};

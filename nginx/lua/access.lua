@@ -1136,7 +1136,9 @@ local function log_request(site_config, client_ip, uri, status, is_blocked, reas
 
     -- 默认仅记录被拦截请求；放行请求可通过 log_sample_rate 抽样记录
     if not is_blocked then
-        local sample_rate = tonumber(site_config.log_sample_rate or 0) or 0
+        local sample_rate = tonumber(site_config.log_sample_rate)
+            or tonumber(site_config.sampling_rate)
+            or 0
         if sample_rate <= 0 or math.random() >= sample_rate then
             return
         end

@@ -201,6 +201,28 @@
             </small>
           </div>
 
+          <div class="form-row align-items-end">
+            <div class="form-group col-md-6">
+              <label class="font-weight-bold">认证类型</label>
+              <select class="form-control" v-model="editConfig.auth_type">
+                <option value="token">API Token (Bearer)</option>
+                <option value="global_key">Global API Key</option>
+              </select>
+              <small class="text-muted">Global API Key 需要填写 X-Auth-Email 和 X-Auth-Key。</small>
+            </div>
+            <div class="form-group col-md-6" v-if="editConfig.auth_type === 'global_key'">
+              <label class="font-weight-bold">Auth Email</label>
+              <input
+                type="email"
+                class="form-control"
+                v-model.trim="editConfig.auth_email"
+                autocomplete="off"
+                placeholder="输入与 Global Key 配套的邮箱"
+              />
+              <small class="text-muted">用来生成 `X-Auth-Email` 头，Global Key 必须填写。</small>
+            </div>
+          </div>
+
           <div class="form-group">
             <label class="font-weight-bold">Zone ID 列表</label>
             <div class="d-flex gap-2 mb-2">
@@ -305,7 +327,7 @@ import axios from 'axios';
 
 const api = axios.create({ baseURL: '/safeline-admin-api' });
 api.interceptors.request.use(cfg => {
-  const t = localStorage.getItem('token') || sessionStorage.getItem('token');
+  const t = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token');
   if (t) cfg.headers.Authorization = 'Bearer ' + t;
   return cfg;
 });
@@ -322,6 +344,8 @@ export default {
       showConfigModal: false,
       editConfig: {
         api_token: '',
+        auth_type: 'token',
+        auth_email: '',
         zone_ids: [],
         enabled: false,
         activate_threshold: 50,
@@ -394,6 +418,8 @@ export default {
           this.editConfig = {
             api_token: '',
             zone_ids: [...(r.data.data.zone_ids || [])],
+            auth_type: r.data.data.auth_type || 'token',
+            auth_email: r.data.data.auth_email || '',
             enabled: !!r.data.data.enabled,
             activate_threshold: r.data.data.activate_threshold || 50,
             deactivate_threshold: r.data.data.deactivate_threshold || 10,
@@ -424,6 +450,14 @@ export default {
         // Merge manually-typed zone IDs from textarea
         const textZones = this.zoneIdsText.split('\n').map(s => s.trim()).filter(Boolean);
         payload.zone_ids = textZones.length ? textZones : this.editConfig.zone_ids;
+        payload.auth_email = payload.auth_type === 'global_key'
+          ? (payload.auth_email || '').trim()
+          : '';
+        if (payload.auth_type === 'global_key' && !payload.auth_email) {
+          this.saveError = 'Global API Key 模式需要填写 Auth Email';
+          this.saveLoading = false;
+          return;
+        }
         const r = await api.put('/cf/config', payload);
         if (r.data.success) {
           this.cfConfig = r.data.data;
