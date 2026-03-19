@@ -56,7 +56,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
   router.put('/cf/config', async (req, res) => {
     try {
       const {
-        api_token, zone_ids, enabled,
+        api_token, auth_type, auth_email, zone_ids, enabled,
         activate_threshold, deactivate_threshold,
         cooldown_s, normal_security_level, timeout_ms,
       } = req.body;
@@ -69,8 +69,12 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
         api_token_enc = encryptToken(api_token.trim(), jwtSecret);
       }
 
+      const resolvedAuthType = auth_type === 'global_key' ? 'global_key' : 'token';
+
       const cfg = {
         api_token_enc,
+        auth_type:              resolvedAuthType,
+        auth_email:             resolvedAuthType === 'global_key' ? String(auth_email || existing.auth_email || '').trim() : '',
         zone_ids:               Array.isArray(zone_ids) ? zone_ids.filter(Boolean) : (existing.zone_ids || []),
         enabled:                enabled !== undefined ? !!enabled : !!existing.enabled,
         activate_threshold:     Number(activate_threshold)   || existing.activate_threshold   || 50,
@@ -151,7 +155,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       const cfg = JSON.parse(raw);
       if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
       const token = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000);
+      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
       const zones  = await client.listZones();
       return ok(res, zones);
     } catch (e) {
@@ -167,7 +171,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       const cfg = JSON.parse(raw);
       if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
       const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000);
+      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
       try {
         const zones = await client.listZones();
         return ok(res, { connected: true, zones_found: zones.length });
@@ -189,7 +193,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       if (!cfg.zone_ids || cfg.zone_ids.length === 0) return fail(res, 400, 'No Zone IDs configured');
 
       const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000);
+      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
       const errors = [];
 
       for (const zoneId of cfg.zone_ids) {
@@ -225,7 +229,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       if (!cfg.zone_ids || cfg.zone_ids.length === 0) return fail(res, 400, 'No Zone IDs configured');
 
       const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000);
+      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
       const level  = cfg.normal_security_level || 'medium';
       const errors = [];
 

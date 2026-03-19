@@ -1303,7 +1303,7 @@ function _M.log_event(event_type, data)
         return false
     end
 
-    local max_qps = tonumber(config_dict:get("redis_logs_max_qps") or 0) or 0
+    local max_qps = tonumber(config_dict:get("redis_logs_max_qps") or 100) or 100
     if max_qps <= 0 then
         return false
     end

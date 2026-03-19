@@ -89,19 +89,36 @@ function decryptToken(ciphertext, secret) {
 
 // ── Cloudflare API client ────────────────────────────────────────────────────
 class CfApiClient {
-  constructor(token, timeoutMs = 10000) {
+  /**
+   * @param {string} token      - API Token (Bearer) or Global API Key
+   * @param {number} timeoutMs
+   * @param {string} authType   - 'token' (default) | 'global_key'
+   * @param {string} authEmail  - required when authType === 'global_key'
+   */
+  constructor(token, timeoutMs = 10000, authType = 'token', authEmail = '') {
     this.token     = token;
     this.timeoutMs = timeoutMs;
+    this.authType  = authType;
+    this.authEmail = authEmail;
   }
 
   _request(method, path, body) {
     const https = require('https');
     return new Promise((resolve, reject) => {
       const bodyStr = body ? JSON.stringify(body) : '';
-      const headers = {
-        'Authorization': `Bearer ${this.token}`,
-        'Content-Type':  'application/json',
-      };
+      let headers;
+      if (this.authType === 'global_key') {
+        headers = {
+          'X-Auth-Email': this.authEmail,
+          'X-Auth-Key':   this.token,
+          'Content-Type': 'application/json',
+        };
+      } else {
+        headers = {
+          'Authorization': `Bearer ${this.token}`,
+          'Content-Type':  'application/json',
+        };
+      }
       if (bodyStr) headers['Content-Length'] = Buffer.byteLength(bodyStr);
 
       const req = https.request({

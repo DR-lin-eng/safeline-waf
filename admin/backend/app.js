@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
+const { execFile } = require('child_process');
 const axios = require('axios');
 const Redis = require('ioredis');
 const morgan = require('morgan');
@@ -383,6 +384,7 @@ function normalizeSiteTlsConfig(siteConfig, domain) {
 
   return {
     enabled: tlsInput.enabled === true,
+    domain,
     cert_path: certPath,
     key_path: keyPath,
     redirect_http_to_https: tlsInput.redirect_http_to_https !== false,
@@ -728,6 +730,30 @@ function mapNginxCertPathToHostPath(nginxPath) {
   return path.join(CERTS_DIR, relativePath);
 }
 
+/** Generate a self-signed certificate for a domain using openssl. */
+function generateSelfSignedCert(domain, certHostPath, keyHostPath) {
+  return new Promise((resolve, reject) => {
+    const subj = `/CN=${domain}`;
+    const san  = `subjectAltName=DNS:${domain}`;
+    const args = [
+      'req', '-x509', '-nodes',
+      '-days', '3650',
+      '-newkey', 'rsa:2048',
+      '-keyout', keyHostPath,
+      '-out',    certHostPath,
+      '-subj',   subj,
+      '-addext', san,
+    ];
+    execFile('openssl', args, { timeout: 30000 }, (err) => {
+      if (err) {
+        reject(new Error(`Failed to generate self-signed certificate: ${err.message}`));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
 async function validateSiteTlsFiles(siteConfig) {
   const normalizedSiteConfig = normalizeSiteConfig(siteConfig, siteConfig && siteConfig.domain);
   const tlsConfig = normalizeSiteTlsConfig(normalizedSiteConfig, normalizedSiteConfig.domain);
@@ -750,7 +776,14 @@ async function validateSiteTlsFiles(siteConfig) {
   try {
     await fs.access(certHostPath);
   } catch (_) {
-    throw new Error(`TLS certificate file not found: ${tlsConfig.cert_path}`);
+    // Cert file missing — generate a self-signed certificate as fallback
+    try {
+      await fs.mkdir(path.dirname(certHostPath), { recursive: true });
+      await generateSelfSignedCert(tlsConfig.domain || normalizedSiteConfig.domain, certHostPath, keyHostPath);
+    } catch (genErr) {
+      throw new Error(`TLS certificate file not found: ${tlsConfig.cert_path} — and self-signed generation failed: ${genErr.message}`);
+    }
+    return; // both cert and key were just generated
   }
 
   try {
@@ -900,9 +933,7 @@ function validateCertificateBundle(certContent, keyContent, domain) {
 
   const hostnames = extractCertificateHostnames(x509);
   const matched = hostnames.some((hostname) => matchCertificateHostname(hostname, normalizedDomain));
-  if (!matched) {
-    throw new Error(`Certificate SAN/CN does not match domain ${normalizedDomain}`);
-  }
+  const domain_warning = matched ? null : `Certificate SAN/CN (${hostnames.join(', ') || 'none'}) does not match domain ${normalizedDomain} — the certificate may not work correctly`;
 
   let privateKey;
   try {
@@ -931,7 +962,8 @@ function validateCertificateBundle(certContent, keyContent, domain) {
     valid_from: validFrom.toISOString(),
     valid_to: validTo.toISOString(),
     days_remaining: Math.max(0, Math.floor((validTo.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))),
-    hostnames
+    hostnames,
+    domain_warning,
   };
 }
 
