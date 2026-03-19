@@ -429,6 +429,23 @@ prepare_env() {
     if [ "$ENV_ACTION" = "preserve" ]; then
         if [ "$ENV_EXISTED_BEFORE" -eq 1 ] && [ "$env_has_required_fields" -eq 1 ]; then
             info "升级模式：保留现有 .env、JWT_SECRET、REDIS_PASSWORD 和管理员凭据"
+            # 迁移：若旧 .env 的 ADMIN_PASSWORD_HASH 未对 $ 做 $$ 转义，自动修复
+            local _mig_jwt _mig_redis _mig_user _mig_hash _mig_escaped
+            _mig_jwt=$(grep '^JWT_SECRET='          "$env_file" | cut -d= -f2-)
+            _mig_redis=$(grep '^REDIS_PASSWORD='    "$env_file" | cut -d= -f2-)
+            _mig_user=$(grep '^ADMIN_USERNAME='     "$env_file" | cut -d= -f2-)
+            _mig_hash=$(grep '^ADMIN_PASSWORD_HASH=' "$env_file" | cut -d= -f2-)
+            _mig_escaped=$(printf '%s' "$_mig_hash" | sed 's/\$/\$\$/g')
+            if [ "$_mig_hash" != "$_mig_escaped" ]; then
+                {
+                    printf 'JWT_SECRET=%s\n'          "$_mig_jwt"
+                    printf 'REDIS_PASSWORD=%s\n'      "$_mig_redis"
+                    printf 'ADMIN_USERNAME=%s\n'      "$_mig_user"
+                    printf 'ADMIN_PASSWORD_HASH=%s\n' "$_mig_escaped"
+                } > "$env_file"
+                chmod 600 "$env_file"
+                info "已将 ADMIN_PASSWORD_HASH 中的 \$ 转义为 \$\$ 以兼容 docker-compose"
+            fi
             return 0
         fi
 
@@ -634,12 +651,15 @@ prepare_env() {
     fi
 
     umask 177
-    # 用 printf 逐行写入，确保值中的 $ 不被任何 shell 展开
+    # bcrypt 哈希含 $ 符号；docker-compose 读取 .env 时会做变量插值，
+    # 必须将 $ 转义为 $$ 才能保证完整传入容器（compose 会将 $$ 还原为 $）
+    local escaped_hash
+    escaped_hash=$(printf '%s' "$admin_password_hash" | sed 's/\$/\$\$/g')
     {
         printf 'JWT_SECRET=%s\n'          "$jwt_secret"
         printf 'REDIS_PASSWORD=%s\n'      "$redis_password"
         printf 'ADMIN_USERNAME=%s\n'      "$admin_username"
-        printf 'ADMIN_PASSWORD_HASH=%s\n' "$admin_password_hash"
+        printf 'ADMIN_PASSWORD_HASH=%s\n' "$escaped_hash"
     } > "$env_file"
     chmod 600 "$env_file"
 
