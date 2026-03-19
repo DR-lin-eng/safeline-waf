@@ -782,6 +782,28 @@ async function ensureNginxReadableFile(filePath) {
   }
 }
 
+async function copyFileForManagedCerts(sourcePath, targetPath) {
+  if (!sourcePath || !targetPath || sourcePath === targetPath) {
+    return;
+  }
+
+  await ensureNginxReadableFile(sourcePath);
+
+  try {
+    await fs.copyFile(sourcePath, targetPath);
+    return;
+  } catch (copyError) {
+    // Some Docker volume drivers reject copy_file_range/clone-style copyfile calls.
+    // Fall back to a plain read/write copy for small PEM assets.
+    if (!['EPERM', 'EXDEV', 'ENOTSUP', 'EOPNOTSUPP'].includes(copyError && copyError.code)) {
+      throw copyError;
+    }
+  }
+
+  const fileContent = await fs.readFile(sourcePath);
+  await fs.writeFile(targetPath, fileContent);
+}
+
 /** Generate a self-signed certificate for a domain using openssl. */
 function generateSelfSignedCert(domain, certHostPath, keyHostPath) {
   return new Promise((resolve, reject) => {
@@ -841,12 +863,8 @@ async function validateSiteTlsFiles(siteConfig) {
     const currentPairExists = await fileExists(currentCertHostPath) && await fileExists(currentKeyHostPath);
     if (currentPairExists) {
       await fs.mkdir(path.dirname(desiredCertHostPath), { recursive: true });
-      if (currentCertHostPath !== desiredCertHostPath) {
-        await fs.copyFile(currentCertHostPath, desiredCertHostPath);
-      }
-      if (currentKeyHostPath !== desiredKeyHostPath) {
-        await fs.copyFile(currentKeyHostPath, desiredKeyHostPath);
-      }
+      await copyFileForManagedCerts(currentCertHostPath, desiredCertHostPath);
+      await copyFileForManagedCerts(currentKeyHostPath, desiredKeyHostPath);
     }
   }
 
