@@ -452,23 +452,39 @@ prepare_env() {
 
     hash_password() {
         local plain_password="$1"
-        local hashed_password=''
+        local _tmpfile
+        local _result
+
+        _tmpfile=$(mktemp 2>/dev/null) || _tmpfile="/tmp/.safeline_bcrypt_$$"
 
         if command -v docker &>/dev/null; then
-            hashed_password=$(docker run --rm -i node:20-alpine node -e "const bcrypt=require('bcryptjs');let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>data+=c);process.stdin.on('end',async()=>{process.stdout.write(await bcrypt.hash(data.replace(/\r?\n$/, ''), 12));});" <<< "$plain_password" 2>/dev/null)
-            if [ $? -eq 0 ] && [ -n "$hashed_password" ]; then
-                printf '%s\n' "$hashed_password"
-                return 0
+            docker run --rm -i node:20-alpine \
+                node -e "const bcrypt=require('bcryptjs');let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>data+=c);process.stdin.on('end',async()=>{process.stdout.write(await bcrypt.hash(data.replace(/\r?\n$/, ''), 12));});" \
+                <<< "$plain_password" > "$_tmpfile" 2>/dev/null
+            if [ $? -eq 0 ] && [ -s "$_tmpfile" ]; then
+                _result=$(cat "$_tmpfile")
+                if printf '%s' "$_result" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+                    rm -f "$_tmpfile"
+                    printf '%s\n' "$_result"
+                    return 0
+                fi
             fi
-            warn "使用 Docker 生成 bcrypt 哈希失败，尝试本机 node 兜底"
+            rm -f "$_tmpfile"
+            echo "使用 Docker 生成 bcrypt 哈希失败，尝试本机 node 兜底" >&2
         fi
 
         if command -v node &>/dev/null; then
-            hashed_password=$(node -e "const fs=require('fs');const path=require('path');const candidates=['/opt/safeline-waf/admin/backend/node_modules/bcryptjs','/opt/safeline-waf/admin/backend/node_modules','/opt/safeline-waf/node_modules/bcryptjs','bcryptjs'];let bcrypt=null;for(const candidate of candidates){try{if(candidate.endsWith('/node_modules')){bcrypt=require(path.join(candidate,'bcryptjs'));}else{bcrypt=require(candidate);}break;}catch(_) {}}if(!bcrypt){console.error('missing bcryptjs');process.exit(1);}const password=fs.readFileSync(0,'utf8').replace(/\r?\n$/, '');bcrypt.hash(password,12).then(hash=>process.stdout.write(hash)).catch(err=>{console.error(err.message);process.exit(1);});" <<< "$plain_password" 2>/dev/null)
-            if [ $? -eq 0 ] && [ -n "$hashed_password" ]; then
-                printf '%s\n' "$hashed_password"
-                return 0
+            node -e "const fs=require('fs');const path=require('path');const candidates=['/opt/safeline-waf/admin/backend/node_modules/bcryptjs','/opt/safeline-waf/admin/backend/node_modules','/opt/safeline-waf/node_modules/bcryptjs','bcryptjs'];let bcrypt=null;for(const candidate of candidates){try{if(candidate.endsWith('/node_modules')){bcrypt=require(path.join(candidate,'bcryptjs'));}else{bcrypt=require(candidate);}break;}catch(_) {}}if(!bcrypt){console.error('missing bcryptjs');process.exit(1);}const password=fs.readFileSync(0,'utf8').replace(/\r?\n$/, '');bcrypt.hash(password,12).then(hash=>process.stdout.write(hash)).catch(err=>{console.error(err.message);process.exit(1);});" \
+                <<< "$plain_password" > "$_tmpfile" 2>/dev/null
+            if [ $? -eq 0 ] && [ -s "$_tmpfile" ]; then
+                _result=$(cat "$_tmpfile")
+                if printf '%s' "$_result" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+                    rm -f "$_tmpfile"
+                    printf '%s\n' "$_result"
+                    return 0
+                fi
             fi
+            rm -f "$_tmpfile"
         fi
 
         return 1
@@ -555,6 +571,12 @@ prepare_env() {
 
     jwt_secret=$(openssl rand -base64 48 | tr -d '\n')
     redis_password=$(openssl rand -hex 32)
+
+    # 写入 .env 前严格校验哈希格式，防止任何非哈希值被写入
+    if ! printf '%s' "$admin_password_hash" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+        error "生成的管理员密码哈希格式无效（应以 \$2a\$ 或 \$2b\$ 开头），请确认 Docker 或 Node 环境可用"
+        exit 1
+    fi
 
     umask 177
     cat > "$env_file" <<EOF
