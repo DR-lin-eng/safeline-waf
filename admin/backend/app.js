@@ -761,6 +761,27 @@ function mapNginxCertPathToHostPath(nginxPath) {
   return path.join(CERTS_DIR, relativePath);
 }
 
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function ensureNginxReadableFile(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.chmod(filePath, 0o644);
+  } catch (_) {
+    // Ignore chmod failures here; nginx -t will still surface a readable error.
+  }
+}
+
 /** Generate a self-signed certificate for a domain using openssl. */
 function generateSelfSignedCert(domain, certHostPath, keyHostPath) {
   return new Promise((resolve, reject) => {
@@ -801,31 +822,65 @@ async function validateSiteTlsFiles(siteConfig) {
     return;
   }
 
-  const certHostPath = mapNginxCertPathToHostPath(tlsConfig.cert_path);
-  const keyHostPath = mapNginxCertPathToHostPath(tlsConfig.key_path);
+  const managedTlsPaths = getDefaultTlsPaths(tlsConfig.domain || normalizedSiteConfig.domain);
+  const desiredCertHostPath = mapNginxCertPathToHostPath(managedTlsPaths.cert_path);
+  const desiredKeyHostPath = mapNginxCertPathToHostPath(managedTlsPaths.key_path);
+  const currentCertHostPath = mapNginxCertPathToHostPath(tlsConfig.cert_path);
+  const currentKeyHostPath = mapNginxCertPathToHostPath(tlsConfig.key_path);
 
-  if (!certHostPath || !keyHostPath) {
+  if (!desiredCertHostPath || !desiredKeyHostPath || !currentCertHostPath || !currentKeyHostPath) {
     throw new Error(`TLS certificate paths must be under ${NGINX_CERT_DIR}`);
   }
 
-  try {
-    await fs.access(certHostPath);
-  } catch (_) {
-    // Cert file missing — generate a self-signed certificate as fallback
-    try {
-      await fs.mkdir(path.dirname(certHostPath), { recursive: true });
-      await generateSelfSignedCert(tlsConfig.domain || normalizedSiteConfig.domain, certHostPath, keyHostPath);
-    } catch (genErr) {
-      throw new Error(`TLS certificate file not found: ${tlsConfig.cert_path} — and self-signed generation failed: ${genErr.message}`);
+  const shouldMigrateManagedPair = (
+    tlsConfig.cert_path !== managedTlsPaths.cert_path
+    || tlsConfig.key_path !== managedTlsPaths.key_path
+  );
+
+  if (shouldMigrateManagedPair) {
+    const currentPairExists = await fileExists(currentCertHostPath) && await fileExists(currentKeyHostPath);
+    if (currentPairExists) {
+      await fs.mkdir(path.dirname(desiredCertHostPath), { recursive: true });
+      if (currentCertHostPath !== desiredCertHostPath) {
+        await fs.copyFile(currentCertHostPath, desiredCertHostPath);
+      }
+      if (currentKeyHostPath !== desiredKeyHostPath) {
+        await fs.copyFile(currentKeyHostPath, desiredKeyHostPath);
+      }
     }
-    return; // both cert and key were just generated
   }
 
-  try {
-    await fs.access(keyHostPath);
-  } catch (_) {
-    throw new Error(`TLS private key file not found: ${tlsConfig.key_path}`);
+  tlsConfig.cert_path = managedTlsPaths.cert_path;
+  tlsConfig.key_path = managedTlsPaths.key_path;
+
+  if (isObject(normalizedSiteConfig.tls)) {
+    normalizedSiteConfig.tls.cert_path = managedTlsPaths.cert_path;
+    normalizedSiteConfig.tls.key_path = managedTlsPaths.key_path;
   }
+  if (isObject(siteConfig && siteConfig.tls)) {
+    siteConfig.tls.cert_path = managedTlsPaths.cert_path;
+    siteConfig.tls.key_path = managedTlsPaths.key_path;
+  }
+
+  const certExists = await fileExists(desiredCertHostPath);
+  if (!certExists) {
+    // Missing managed cert — generate a self-signed pair under the current domain name.
+    try {
+      await fs.mkdir(path.dirname(desiredCertHostPath), { recursive: true });
+      await generateSelfSignedCert(
+        tlsConfig.domain || normalizedSiteConfig.domain,
+        desiredCertHostPath,
+        desiredKeyHostPath
+      );
+    } catch (genErr) {
+      throw new Error(`TLS certificate file not found: ${managedTlsPaths.cert_path} — and self-signed generation failed: ${genErr.message}`);
+    }
+  } else if (!await fileExists(desiredKeyHostPath)) {
+    throw new Error(`TLS private key file not found: ${managedTlsPaths.key_path}`);
+  }
+
+  await ensureNginxReadableFile(desiredCertHostPath);
+  await ensureNginxReadableFile(desiredKeyHostPath);
 }
 
 function sanitizeFilename(filename) {
@@ -2147,6 +2202,8 @@ apiRouter.post('/certificates/upload', (req, res) => {
 
       await fs.writeFile(certHostPath, certContent, 'utf8');
       await fs.writeFile(keyHostPath, keyContent, 'utf8');
+      await ensureNginxReadableFile(certHostPath);
+      await ensureNginxReadableFile(keyHostPath);
 
       res.json({
         success: true,
@@ -2178,6 +2235,8 @@ apiRouter.post('/certificates/content', async (req, res) => {
 
     await fs.writeFile(certHostPath, certContent, 'utf8');
     await fs.writeFile(keyHostPath, keyContent, 'utf8');
+    await ensureNginxReadableFile(certHostPath);
+    await ensureNginxReadableFile(keyHostPath);
 
     res.json({
       success: true,
@@ -3326,11 +3385,20 @@ async function triggerNginxReload() {
       };
     }
 
+    const syntaxOutput = payload && typeof payload === 'object'
+      ? payload.nginx_detail && payload.nginx_detail.syntax_test && payload.nginx_detail.syntax_test.output
+      : '';
+    const reloadAttemptOutput = payload && typeof payload === 'object' && payload.nginx_detail && Array.isArray(payload.nginx_detail.attempts)
+      ? payload.nginx_detail.attempts
+        .map((attempt) => attempt && attempt.output)
+        .find((output) => typeof output === 'string' && output.trim())
+      : '';
     const detailMessage = payload && typeof payload === 'object'
       ? (
-        payload.nginx_error
+        syntaxOutput
+        || reloadAttemptOutput
         || payload.config_error
-        || (payload.nginx_detail && payload.nginx_detail.syntax_test && payload.nginx_detail.syntax_test.output)
+        || payload.nginx_error
         || payload.message
       )
       : '';
