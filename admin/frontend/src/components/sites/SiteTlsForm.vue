@@ -39,11 +39,12 @@
     </div>
 
     <small class="form-text text-muted mb-3">
-      证书文件默认存放于 <code>./config/certs/</code>，容器内路径为 <code>/usr/local/openresty/nginx/conf/config/certs/</code>
+      证书文件默认存放于 <code>./config/certs/</code>，容器内路径为 <code>/usr/local/openresty/nginx/conf/config/certs/</code>。
+      如未上传证书但开启 HTTPS，系统会按当前域名自动生成自签名证书。
     </small>
 
     <div class="alert alert-info py-2" v-if="!canUpload">
-      请先填写合法域名，再上传证书。当前仅支持与站点域名匹配的证书。
+      请先填写合法域名，再上传证书。也可以直接开启 HTTPS 而不上传证书，系统会自动生成自签名证书。
     </div>
 
     <div class="card mb-3">

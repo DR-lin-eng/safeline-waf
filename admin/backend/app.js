@@ -3287,36 +3287,19 @@ server {
     listen 80;
     server_name ${domain};
 
-    # 鍩虹闄愭祦/闄愯繛锛堝彲鎸変笟鍔¤皟鏁达紱鐢ㄤ簬鎶靛尽 storm/杩炴帴椋庢毚/鐖嗗彂鎬ц姹傦級
     limit_conn safeline_conn_per_ip 50;
     limit_req zone=safeline_req_per_ip burst=200 nodelay;
 
-    # HTTPS/HTTP2/HTTP3(QUIC) 閰嶇疆绀轰緥锛堥粯璁や笉鍚敤锛岄伩鍏嶅綋鍓嶉暅鍍忎笉鏀寔瀵艰嚧鍚姩澶辫触锛?    # listen 443 ssl http2;
-    # ssl_certificate /usr/local/openresty/nginx/certs/${domain}.crt;
-    # ssl_certificate_key /usr/local/openresty/nginx/certs/${domain}.key;
-    #
-    # 闃插尽HTTP/2鏀诲嚮锛堝 Rapid Reset / 澶撮儴鐐稿脊 / 杩囬珮骞跺彂娴侊級锛?    # - 闇€浼樺厛纭繚Nginx/OpenResty鐗堟湰宸插寘鍚拡瀵?CVE-2023-44487 鐨勪慨澶?    # - 鍐嶉€氳繃骞跺彂娴併€佸ご閮ㄥぇ灏忎笌瓒呮椂鏀剁揣璧勬簮涓婇檺锛堜笉鍚岀増鏈寚浠ゆ敮鎸佹儏鍐典笉鍚岋紝鎸夊疄闄呰皟鏁达級
-    # http2_max_concurrent_streams 128;
-    # http2_max_header_size 32k;
-    # http2_max_field_size 16k;
-    # http2_recv_timeout 10s;
-    # http2_idle_timeout 30s;
-    #
-    # HTTP/3(QUIC) 闇€瑕丯ginx/OpenResty缂栬瘧鍚敤 http_v3/quic锛?    # listen 443 quic reuseport;
-    # add_header Alt-Svc 'h3=":443"; ma=86400'; always;
-    # add_header QUIC-Status $quic; always;
-    
-    # 闈欐€佽祫婧愮洰褰?    location /safeline-static/ {
+    location /safeline-static/ {
         alias /usr/local/openresty/nginx/lua/static/;
         expires 30d;
     }
-    
-  # 楠岃瘉API
-  location /safeline-api/ {
+
+    location /safeline-api/ {
         content_by_lua_block {
             require("captcha").handle()
         }
-  }
+    }
 
     location = /pow {
         default_type text/html;
@@ -3332,13 +3315,11 @@ server {
             require("captcha").handle()
         }
     }
-    
-    # WAF澶勭悊閫昏緫
+
     access_by_lua_file /usr/local/openresty/nginx/lua/access.lua;
     header_filter_by_lua_file /usr/local/openresty/nginx/lua/header_filter.lua;
     body_filter_by_lua_file /usr/local/openresty/nginx/lua/body_filter.lua;
-    
-    # 鍙嶅悜浠ｇ悊璁剧疆
+
     location / {
         proxy_pass ${proxyPassTarget};
         proxy_http_version 1.1;
@@ -3348,8 +3329,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Port $server_port;
 ${proxyPortFollowDirective}${proxySslDirectives}
-
-        # WebSocket鏀寔
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 3600;
