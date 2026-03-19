@@ -465,9 +465,10 @@ prepare_env() {
 
         _tmpfile=$(mktemp 2>/dev/null) || _tmpfile="/tmp/.safeline_bcrypt_$$"
 
+        # 方法1: Docker — 容器内 npm install bcryptjs 后立即哈希，不依赖镜像预装
         if command -v docker &>/dev/null; then
             docker run --rm -i node:20-alpine \
-                node -e "const bcrypt=require('bcryptjs');let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>data+=c);process.stdin.on('end',async()=>{process.stdout.write(await bcrypt.hash(data.replace(/\r?\n$/, ''), 12));});" \
+                sh -c 'npm install bcryptjs --prefix /tmp/sl --no-audit --no-fund --silent 2>/dev/null && node -e "const b=require(\"/tmp/sl/node_modules/bcryptjs\");let d=\"\";process.stdin.setEncoding(\"utf8\");process.stdin.on(\"data\",c=>d+=c);process.stdin.on(\"end\",async()=>{process.stdout.write(await b.hash(d.replace(/\r?\n$/,\"\"),12));});"' \
                 <<< "$plain_password" > "$_tmpfile" 2>/dev/null
             if [ $? -eq 0 ] && [ -s "$_tmpfile" ]; then
                 _result=$(cat "$_tmpfile")
@@ -478,12 +479,34 @@ prepare_env() {
                 fi
             fi
             rm -f "$_tmpfile"
-            echo "使用 Docker 生成 bcrypt 哈希失败，尝试本机 node 兜底" >&2
+            echo "Docker 方式生成 bcrypt 哈希失败，尝试本机 node+npm 兜底" >&2
         fi
 
-        if command -v node &>/dev/null; then
-            node -e "const fs=require('fs');const path=require('path');const candidates=['/opt/safeline-waf/admin/backend/node_modules/bcryptjs','/opt/safeline-waf/admin/backend/node_modules','/opt/safeline-waf/node_modules/bcryptjs','bcryptjs'];let bcrypt=null;for(const candidate of candidates){try{if(candidate.endsWith('/node_modules')){bcrypt=require(path.join(candidate,'bcryptjs'));}else{bcrypt=require(candidate);}break;}catch(_) {}}if(!bcrypt){console.error('missing bcryptjs');process.exit(1);}const password=fs.readFileSync(0,'utf8').replace(/\r?\n$/, '');bcrypt.hash(password,12).then(hash=>process.stdout.write(hash)).catch(err=>{console.error(err.message);process.exit(1);});" \
+        # 方法2: 本机 node + npm — 在临时目录安装 bcryptjs 后哈希
+        if command -v node &>/dev/null && command -v npm &>/dev/null; then
+            local _npm_dir
+            _npm_dir=$(mktemp -d 2>/dev/null) || _npm_dir="/tmp/.sl_npm_$$"
+            npm install bcryptjs --prefix "$_npm_dir" --no-audit --no-fund --silent 2>/dev/null
+            node -e "const b=require('${_npm_dir}/node_modules/bcryptjs');const fs=require('fs');const p=fs.readFileSync(0,'utf8').replace(/\r?\n$/,'');b.hash(p,12).then(h=>process.stdout.write(h)).catch(e=>{console.error(e.message);process.exit(1);});" \
                 <<< "$plain_password" > "$_tmpfile" 2>/dev/null
+            local _node_rc=$?
+            rm -rf "$_npm_dir"
+            if [ $_node_rc -eq 0 ] && [ -s "$_tmpfile" ]; then
+                _result=$(cat "$_tmpfile")
+                if printf '%s' "$_result" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+                    rm -f "$_tmpfile"
+                    printf '%s\n' "$_result"
+                    return 0
+                fi
+            fi
+            rm -f "$_tmpfile"
+            echo "本机 node+npm 生成 bcrypt 哈希失败，尝试 Python3 兜底" >&2
+        fi
+
+        # 方法3: Python3 + bcrypt 包
+        if command -v python3 &>/dev/null; then
+            local _py='import sys,bcrypt as bc;p=sys.stdin.read().rstrip("\n").rstrip("\r").encode();print(bc.hashpw(p,bc.gensalt(12)).decode(),end="")'
+            python3 -c "$_py" <<< "$plain_password" > "$_tmpfile" 2>/dev/null
             if [ $? -eq 0 ] && [ -s "$_tmpfile" ]; then
                 _result=$(cat "$_tmpfile")
                 if printf '%s' "$_result" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
@@ -493,8 +516,24 @@ prepare_env() {
                 fi
             fi
             rm -f "$_tmpfile"
+            # 尝试用 pip3 安装 bcrypt 后重试
+            if command -v pip3 &>/dev/null; then
+                pip3 install bcrypt --quiet 2>/dev/null
+                python3 -c "$_py" <<< "$plain_password" > "$_tmpfile" 2>/dev/null
+                if [ $? -eq 0 ] && [ -s "$_tmpfile" ]; then
+                    _result=$(cat "$_tmpfile")
+                    if printf '%s' "$_result" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+                        rm -f "$_tmpfile"
+                        printf '%s\n' "$_result"
+                        return 0
+                    fi
+                fi
+                rm -f "$_tmpfile"
+            fi
+            echo "Python3 方式生成 bcrypt 哈希失败" >&2
         fi
 
+        rm -f "$_tmpfile"
         return 1
     }
 
@@ -529,7 +568,8 @@ prepare_env() {
 
             admin_password_hash=$(hash_password "$admin_password")
             if [ -z "$admin_password_hash" ]; then
-                error "无法生成管理员密码哈希，请确认 Docker 或 Node 环境可用"
+                error "无法生成管理员密码哈希，已尝试 Docker/node+npm/Python3 三种方式均失败"
+                error "请确认以下至少一项可用：Docker（推荐）、node+npm、python3+bcrypt"
                 exit 1
             fi
 
@@ -557,7 +597,8 @@ prepare_env() {
             admin_password_hash=$(hash_password "$admin_password")
             admin_password=''
             if [ -z "$admin_password_hash" ]; then
-                error "已提供 ADMIN_PASSWORD，但无法生成 bcrypt 哈希，请确认 Docker 或 Node 环境可用"
+                error "已提供 ADMIN_PASSWORD，但无法生成 bcrypt 哈希"
+                error "已尝试 Docker/node+npm/Python3 三种方式均失败，请确认至少一项可用"
                 exit 1
             fi
             return 0
@@ -567,7 +608,8 @@ prepare_env() {
         ENV_TEMP_PASSWORD_IS_GENERATED=1
         admin_password_hash=$(hash_password "$ENV_GENERATED_TEMP_PASSWORD")
         if [ -z "$admin_password_hash" ]; then
-            error "无法为非交互安装生成临时管理员密码哈希，请确认 Docker 或 Node 环境可用"
+            error "无法为非交互安装生成临时管理员密码哈希"
+            error "已尝试 Docker/node+npm/Python3 三种方式均失败，请确认至少一项可用"
             exit 1
         fi
     }
