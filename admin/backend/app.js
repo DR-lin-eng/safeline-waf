@@ -3582,9 +3582,10 @@ ${proxyPortFollowDirective}${proxySslDirectives}
         proxy_send_timeout 3600;
     }`;
 
-    const httpsListenDirective = tlsConfig.http2_enabled
-      ? 'listen 443 ssl http2;'
-      : 'listen 443 ssl;';
+    const httpsListenDirective = 'listen 443 ssl;';
+    const httpsProtocolDirective = tlsConfig.http2_enabled
+      ? '    http2 on;\n'
+      : '';
     const httpBlock = tlsConfig.redirect_http_to_https
       ? `
 server {
@@ -3602,7 +3603,7 @@ ${sharedDirectives}
     const httpsBlock = `
 server {
     ${httpsListenDirective}
-    server_name ${domain};
+${httpsProtocolDirective}    server_name ${domain};
     ssl_certificate ${tlsConfig.cert_path};
     ssl_certificate_key ${tlsConfig.key_path};
 ${sharedDirectives}
