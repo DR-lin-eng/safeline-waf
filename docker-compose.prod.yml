@@ -79,13 +79,13 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_PASSWORD
       - NGINX_RELOAD_URL=http://nginx:80/_reload
       - NGINX_METRICS_URL=http://nginx:80/_metrics
       - NGINX_CONF_DIR=/nginx/conf.d
-      - JWT_SECRET=${JWT_SECRET}
+      - JWT_SECRET
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
+      - ADMIN_PASSWORD_HASH
       - NODE_ENV=${NODE_ENV:-production}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
       - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}

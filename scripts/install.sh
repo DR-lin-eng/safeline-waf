@@ -634,12 +634,13 @@ prepare_env() {
     fi
 
     umask 177
-    cat > "$env_file" <<EOF
-JWT_SECRET=$jwt_secret
-REDIS_PASSWORD=$redis_password
-ADMIN_USERNAME=$admin_username
-ADMIN_PASSWORD_HASH=$admin_password_hash
-EOF
+    # 用 printf 逐行写入，确保值中的 $ 不被任何 shell 展开
+    {
+        printf 'JWT_SECRET=%s\n'          "$jwt_secret"
+        printf 'REDIS_PASSWORD=%s\n'      "$redis_password"
+        printf 'ADMIN_USERNAME=%s\n'      "$admin_username"
+        printf 'ADMIN_PASSWORD_HASH=%s\n' "$admin_password_hash"
+    } > "$env_file"
     chmod 600 "$env_file"
 
     ENV_WAS_REGENERATED=1
