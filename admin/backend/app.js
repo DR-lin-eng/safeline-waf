@@ -2270,13 +2270,27 @@ apiRouter.put('/sites/:domain', async (req, res) => {
       return sendError(res, 500, publishError.message || 'Snapshot publish failed');
     }
 
+    const reloadResult = await triggerNginxReload();
+    if (!reloadResult.success) {
+      await restoreTextFile(sitePath, previousSiteRaw);
+      await restoreTextFile(nginxConfigPath, previousNginxRaw);
+      return sendError(
+        res,
+        500,
+        reloadResult.message
+          ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
+          : 'Failed to reload Nginx configuration (rolled back)'
+      );
+    }
+
     return res.json({
       success: true,
       message: '站点配置已更新并已发布',
       snapshot: {
         version: snapshotBundle.version,
         compiled_at: snapshotBundle.compiled_at
-      }
+      },
+      reload: reloadResult.detail || null
     });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to update site configuration');
@@ -2343,13 +2357,30 @@ apiRouter.delete('/sites/:domain', async (req, res) => {
       return sendError(res, 500, publishError.message || 'Snapshot publish failed');
     }
 
+    const reloadResult = await triggerNginxReload();
+    if (!reloadResult.success) {
+      await restoreTextFile(sitePath, previousSiteRaw);
+      await restoreTextFile(nginxConfigPath, previousNginxRaw);
+      if (legacyNginxConfigPath) {
+        await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
+      }
+      return sendError(
+        res,
+        500,
+        reloadResult.message
+          ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
+          : 'Failed to reload Nginx configuration (rolled back)'
+      );
+    }
+
     return res.json({
       success: true,
       message: 'Site configuration deleted and published',
       snapshot: {
         version: snapshotBundle.version,
         compiled_at: snapshotBundle.compiled_at
-      }
+      },
+      reload: reloadResult.detail || null
     });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to delete site configuration');
@@ -3246,6 +3277,40 @@ apiRouter.get('/runtime/profile', async (req, res) => {
     res.status(500).json({ success: false, message: '鑾峰彇杩愯閰嶇疆寤鸿澶辫触', error: error.message });
   }
 });
+
+async function triggerNginxReload() {
+  const url = process.env.NGINX_RELOAD_URL || 'http://nginx:80/_reload';
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 15000,
+      validateStatus: () => true
+    });
+
+    const payload = response.data;
+    if (response.status >= 200 && response.status < 300 && payload && payload.success) {
+      return {
+        success: true,
+        detail: payload
+      };
+    }
+
+    const message = payload && typeof payload.message === 'string'
+      ? payload.message
+      : `Nginx reload returned HTTP ${response.status}`;
+
+    return {
+      success: false,
+      message,
+      detail: payload || { status: response.status }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: error.message || 'Failed to reach Nginx reload endpoint'
+    };
+  }
+}
 
 // 鐢熸垚Nginx閰嶇疆鏂囦欢
 async function generateNginxConfig(domain, siteConfig) {
