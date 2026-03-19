@@ -31,7 +31,7 @@ error() {
 }
 
 success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
 
 select_install_mode() {
@@ -170,10 +170,14 @@ check_system() {
             ;;
         *)
             warn "操作系统 $OS 未经过全面测试，安装可能会失败"
-            read -p "是否继续? (y/n) " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -r -p "是否继续? (y/n) " -n 1
+                echo
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    exit 1
+                fi
+            else
+                warn "非交互模式，自动继续..."
             fi
             ;;
     esac
@@ -189,10 +193,14 @@ check_system() {
 
     if awk "BEGIN {exit !(${MEM_TOTAL_GB} < 1.5)}"; then
         warn "系统内存不足，推荐至少2GB内存运行SafeLine WAF"
-        read -p "是否继续? (y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
+        if [ -t 0 ] && [ -t 1 ]; then
+            read -r -p "是否继续? (y/n) " -n 1
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
+        else
+            warn "非交互模式，自动继续..."
         fi
     fi
     
@@ -537,6 +545,11 @@ prepare_env() {
         admin_password=${ADMIN_PASSWORD:-}
 
         if [ -n "$admin_password_hash" ]; then
+            # 外部传入哈希时提前校验格式，给出明确错误而不是等到写入 .env 前才报
+            if ! printf '%s' "$admin_password_hash" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
+                error "外部传入的 ADMIN_PASSWORD_HASH 格式无效（应以 \$2a\$ 或 \$2b\$ 开头）"
+                exit 1
+            fi
             return 0
         fi
 
@@ -732,46 +745,56 @@ build_and_run() {
 
 # 检查服务状态
 check_status() {
+    local prod_compose="/opt/safeline-waf/docker-compose.prod.yml"
+    local compose_f=''
+    local containers
+    local container
+    local status
+    local name
+    local health
+
     info "检查服务状态..."
-    
+
     sleep 5
-    
-    # 检查容器状态
-    PROD_COMPOSE="/opt/safeline-waf/docker-compose.prod.yml"
-    COMPOSE_F=""
-    [ -f "$PROD_COMPOSE" ] && COMPOSE_F="-f $PROD_COMPOSE"
-    CONTAINERS=$(docker_compose $COMPOSE_F ps -q)
-    
-    if [ -z "$CONTAINERS" ]; then
+
+    [ -f "$prod_compose" ] && compose_f="-f $prod_compose"
+    containers=$(docker_compose $compose_f ps -q)
+
+    if [ -z "$containers" ]; then
         error "没有找到运行中的容器"
         exit 1
     fi
-    
-    for CONTAINER in $CONTAINERS; do
-        STATUS=$(docker inspect --format='{{.State.Status}}' $CONTAINER)
-        NAME=$(docker inspect --format='{{.Name}}' $CONTAINER | sed 's/\///')
-        HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' $CONTAINER)
 
-        if [ "$STATUS" != "running" ] || [ "$HEALTH" = "unhealthy" ]; then
-            error "容器 $NAME 状态异常: status=$STATUS health=$HEALTH"
-            info "--- $NAME 最后 30 行日志 ---"
-            docker logs --tail 30 $CONTAINER 2>&1
+    for container in $containers; do
+        status=$(docker inspect --format='{{.State.Status}}' "$container")
+        name=$(docker inspect --format='{{.Name}}' "$container" | sed 's/\///')
+        health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' "$container")
+
+        if [ "$status" != "running" ] || [ "$health" = "unhealthy" ]; then
+            error "容器 $name 状态异常: status=$status health=$health"
+            info "--- $name 最后 30 行日志 ---"
+            docker logs --tail 30 "$container" 2>&1
             exit 1
         else
-            info "容器 $NAME 正在运行 (health=$HEALTH)"
+            info "容器 $name 正在运行 (health=$health)"
         fi
     done
-    
-    # 检查Nginx是否监听端口
+
+    # 检查 Nginx 是否监听端口（优先 ss，回退 netstat）
     sleep 2
-    NGINX_PORT=$(docker exec safeline-waf-nginx netstat -tlnp | grep -E ':80.*LISTEN')
-    
-    if [ -z "$NGINX_PORT" ]; then
-        warn "Nginx似乎没有正确监听80端口"
-    else
-        success "Nginx正在监听80端口"
+    local nginx_listening=''
+    if docker exec safeline-waf-nginx ss -tlnp 2>/dev/null | grep -qE ':80'; then
+        nginx_listening=1
+    elif docker exec safeline-waf-nginx netstat -tlnp 2>/dev/null | grep -qE ':80.*LISTEN'; then
+        nginx_listening=1
     fi
-    
+
+    if [ -z "$nginx_listening" ]; then
+        warn "Nginx 似乎没有正确监听 80 端口"
+    else
+        success "Nginx 正在监听 80 端口"
+    fi
+
     success "所有服务已启动并运行正常"
 }
 
@@ -806,6 +829,7 @@ show_info() {
         echo -e "临时管理员密码: ${YELLOW}$ENV_GENERATED_TEMP_PASSWORD${NC}"
         echo "这是一次性引导密码，请首次登录后立即修改！"
         echo
+        ENV_GENERATED_TEMP_PASSWORD=''
     elif [ "$INSTALL_MODE" = "upgrade" ] && [ "$ENV_WAS_REGENERATED" -eq 0 ]; then
         echo "本次升级保留了现有管理员凭据，密码未被重置，请使用升级前的密码登录。"
         echo
