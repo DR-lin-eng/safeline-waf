@@ -596,6 +596,69 @@ function _M.clear_blacklist()
     return redis_cleared ~= false
 end
 
+local function apply_cluster_blacklist_entry(ip, expiry)
+    if type(ip) ~= "string" or ip == "" then
+        return
+    end
+
+    local ttl = tonumber(expiry)
+    if ttl == nil or ttl <= 0 or ttl == -1 then
+        blacklist_dict:set(ip, true)
+        ttl = 0
+    else
+        blacklist_dict:set(ip, true, ttl)
+    end
+
+    local cache_cfg = get_cache_cfg()
+    local lru = get_lru(cache_cfg)
+    if lru then
+        local cache_ttl = ttl
+        if cache_ttl == 0 then
+            cache_ttl = cache_cfg.positive_default_ttl
+        end
+        lru:set(ip, true, cache_ttl)
+    end
+end
+
+local function remove_cluster_blacklist_entry(ip)
+    if type(ip) ~= "string" or ip == "" then
+        return
+    end
+
+    blacklist_dict:delete(ip)
+
+    local cache_cfg = get_cache_cfg()
+    local lru = get_lru(cache_cfg)
+    if lru then
+        lru:delete(ip)
+    end
+end
+
+local function replace_cluster_permanent_entries(entries)
+    local desired = {}
+    local synced = 0
+
+    for _, ip in ipairs(entries or {}) do
+        if type(ip) == "string" and ip ~= "" then
+            desired[ip] = true
+        end
+    end
+
+    for _, key in ipairs(blacklist_dict:get_keys(0)) do
+        local ttl = blacklist_dict:ttl(key)
+        if (ttl == 0 or ttl == nil) and not desired[key] then
+            remove_cluster_blacklist_entry(key)
+        end
+    end
+
+    for ip, _ in pairs(desired) do
+        apply_cluster_blacklist_entry(ip, 0)
+        synced = synced + 1
+    end
+
+    return synced
+end
+
 -- Sync blacklist from Redis cluster
 function _M.sync_from_cluster()
     local redis = require "resty.redis"
@@ -628,14 +691,7 @@ function _M.sync_from_cluster()
         return false, err
     end
 
-    -- Update local shared dict
-    local synced = 0
-    for _, ip in ipairs(entries) do
-        if type(ip) == "string" and ip ~= "" then
-            blacklist_dict:set(ip, true, 0) -- 0 = permanent
-            synced = synced + 1
-        end
-    end
+    local synced = replace_cluster_permanent_entries(entries)
 
     red:close()
     ngx.log(ngx.NOTICE, "[Cluster] Synced ", synced, " blacklist entries from cluster")
@@ -645,65 +701,66 @@ end
 -- Subscribe to blacklist sync events
 function _M.subscribe_cluster_blacklist()
     local redis = require "resty.redis"
-    local red = redis:new()
-    red:set_timeouts(1000, 1000, 1000)
-
     local redis_host = os.getenv("REDIS_HOST") or "redis"
     local redis_port = tonumber(os.getenv("REDIS_PORT") or "6379")
     local redis_password = os.getenv("REDIS_PASSWORD")
 
-    local ok, err = red:connect(redis_host, redis_port)
-    if not ok then
-        ngx.log(ngx.ERR, "[Cluster] Failed to connect to Redis for Pub/Sub: ", err)
-        return
-    end
+    while not ngx.worker.exiting() do
+        local red = redis:new()
+        red:set_timeouts(1000, 1000, 1000)
 
-    if redis_password and redis_password ~= "" then
-        local res, err = red:auth(redis_password)
-        if not res then
-            ngx.log(ngx.ERR, "[Cluster] Redis auth failed: ", err)
-            return
-        end
-    end
-
-    local res, err = red:subscribe("cluster:blacklist:sync")
-    if not res then
-        ngx.log(ngx.ERR, "[Cluster] Failed to subscribe to cluster:blacklist:sync: ", err)
-        return
-    end
-
-    ngx.log(ngx.NOTICE, "[Cluster] Subscribed to cluster:blacklist:sync channel")
-
-    -- Listen for messages
-    while true do
-        local msg, err = red:read_reply()
-        if not msg then
-            if err ~= "timeout" then
-                ngx.log(ngx.ERR, "[Cluster] Pub/Sub read error: ", err)
-                break
-            end
+        local ok, err = red:connect(redis_host, redis_port)
+        if not ok then
+            ngx.log(ngx.ERR, "[Cluster] Failed to connect to Redis for Pub/Sub: ", err)
         else
-            if type(msg) == "table" and msg[1] == "message" then
-                local ok, payload = pcall(cjson.decode, msg[3])
-                if ok and type(payload) == "table" then
-                    ngx.log(ngx.NOTICE, "[Cluster] Received blacklist sync: ", payload.action)
-
-                    if payload.action == "sync" and type(payload.entries) == "table" then
-                        -- Full sync
-                        for _, ip in ipairs(payload.entries) do
-                            if type(ip) == "string" and ip ~= "" then
-                                blacklist_dict:set(ip, true, 0)
-                            end
-                        end
-                    end
+            local ready = true
+            if redis_password and redis_password ~= "" then
+                local auth_ok, auth_err = red:auth(redis_password)
+                if not auth_ok then
+                    ngx.log(ngx.ERR, "[Cluster] Redis auth failed: ", auth_err)
+                    ready = false
                 end
             end
+
+            if ready then
+                local res, subscribe_err = red:subscribe("cluster:blacklist:sync")
+                if not res then
+                    ngx.log(ngx.ERR, "[Cluster] Failed to subscribe to cluster:blacklist:sync: ", subscribe_err)
+                else
+                    ngx.log(ngx.NOTICE, "[Cluster] Subscribed to cluster:blacklist:sync channel")
+
+                    while not ngx.worker.exiting() do
+                        local msg, read_err = red:read_reply()
+                        if not msg then
+                            if read_err ~= "timeout" then
+                                ngx.log(ngx.ERR, "[Cluster] Pub/Sub read error: ", read_err)
+                                break
+                            end
+                        elseif type(msg) == "table" and msg[1] == "message" then
+                            local payload_ok, payload = pcall(cjson.decode, msg[3])
+                            if payload_ok and type(payload) == "table" then
+                                ngx.log(ngx.NOTICE, "[Cluster] Received blacklist sync: ", payload.action)
+
+                                if payload.action == "sync" and type(payload.entries) == "table" then
+                                    replace_cluster_permanent_entries(payload.entries)
+                                elseif payload.action == "add" and type(payload.ip) == "string" and payload.ip ~= "" then
+                                    apply_cluster_blacklist_entry(payload.ip, payload.duration)
+                                elseif payload.action == "remove" and type(payload.ip) == "string" and payload.ip ~= "" then
+                                    remove_cluster_blacklist_entry(payload.ip)
+                                end
+                            end
+                        end
+
+                        ngx.sleep(0.1)
+                    end
+                end
+
+                red:close()
+            end
         end
 
-        ngx.sleep(0.1)
+        ngx.sleep(1)
     end
-
-    red:close()
 end
 
 return _M

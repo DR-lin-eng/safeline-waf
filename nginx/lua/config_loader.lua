@@ -304,61 +304,62 @@ end
 -- Subscribe to Redis Pub/Sub for cluster config reload
 function _M.subscribe_cluster_reload()
     local redis = require "resty.redis"
-    local red = redis:new()
-    red:set_timeouts(1000, 1000, 1000)
-
     local redis_host = os.getenv("REDIS_HOST") or "redis"
     local redis_port = tonumber(os.getenv("REDIS_PORT") or "6379")
     local redis_password = os.getenv("REDIS_PASSWORD")
 
-    local ok, err = red:connect(redis_host, redis_port)
-    if not ok then
-        ngx.log(ngx.ERR, "[Cluster] Failed to connect to Redis for Pub/Sub: ", err)
-        return
-    end
+    while not ngx.worker.exiting() do
+        local red = redis:new()
+        red:set_timeouts(1000, 1000, 1000)
 
-    if redis_password and redis_password ~= "" then
-        local res, err = red:auth(redis_password)
-        if not res then
-            ngx.log(ngx.ERR, "[Cluster] Redis auth failed: ", err)
-            return
-        end
-    end
-
-    local res, err = red:subscribe("cluster:config:reload")
-    if not res then
-        ngx.log(ngx.ERR, "[Cluster] Failed to subscribe to cluster:config:reload: ", err)
-        return
-    end
-
-    ngx.log(ngx.NOTICE, "[Cluster] Subscribed to cluster:config:reload channel")
-
-    -- Listen for messages in a loop
-    while true do
-        local msg, err = red:read_reply()
-        if not msg then
-            if err ~= "timeout" then
-                ngx.log(ngx.ERR, "[Cluster] Pub/Sub read error: ", err)
-                break
-            end
+        local ok, err = red:connect(redis_host, redis_port)
+        if not ok then
+            ngx.log(ngx.ERR, "[Cluster] Failed to connect to Redis for Pub/Sub: ", err)
         else
-            if type(msg) == "table" and msg[1] == "message" then
-                ngx.log(ngx.NOTICE, "[Cluster] Received config reload signal: ", msg[3])
-
-                -- Trigger config reload
-                local success, reload_err = _M.reload()
-                if success then
-                    ngx.log(ngx.NOTICE, "[Cluster] Config reloaded successfully")
-                else
-                    ngx.log(ngx.ERR, "[Cluster] Config reload failed: ", reload_err)
+            local ready = true
+            if redis_password and redis_password ~= "" then
+                local auth_ok, auth_err = red:auth(redis_password)
+                if not auth_ok then
+                    ngx.log(ngx.ERR, "[Cluster] Redis auth failed: ", auth_err)
+                    ready = false
                 end
             end
+
+            if ready then
+                local res, subscribe_err = red:subscribe("cluster:config:reload")
+                if not res then
+                    ngx.log(ngx.ERR, "[Cluster] Failed to subscribe to cluster:config:reload: ", subscribe_err)
+                else
+                    ngx.log(ngx.NOTICE, "[Cluster] Subscribed to cluster:config:reload channel")
+
+                    while not ngx.worker.exiting() do
+                        local msg, read_err = red:read_reply()
+                        if not msg then
+                            if read_err ~= "timeout" then
+                                ngx.log(ngx.ERR, "[Cluster] Pub/Sub read error: ", read_err)
+                                break
+                            end
+                        elseif type(msg) == "table" and msg[1] == "message" then
+                            ngx.log(ngx.NOTICE, "[Cluster] Received config reload signal: ", msg[3])
+
+                            local success, reload_err = _M.reload()
+                            if success then
+                                ngx.log(ngx.NOTICE, "[Cluster] Config reloaded successfully")
+                            else
+                                ngx.log(ngx.ERR, "[Cluster] Config reload failed: ", reload_err)
+                            end
+                        end
+
+                        ngx.sleep(0.1)
+                    end
+                end
+            end
+
+            red:close()
         end
 
-        ngx.sleep(0.1)
+        ngx.sleep(1)
     end
-
-    red:close()
 end
 
 return _M

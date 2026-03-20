@@ -16,6 +16,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
       # 集群配置
       - NODE_ID=${NODE_ID:-node-1}
       - NODE_ROLE=${NODE_ROLE:-worker}
@@ -74,6 +75,7 @@ services:
       - NGINX_CONF_DIR=/nginx/conf.d
       - UPDATER_URL=http://admin-updater:3100
       - UPDATER_SHARED_SECRET=${UPDATER_SHARED_SECRET:-}
+      - UPDATER_SHARED_TOKEN=${UPDATER_SHARED_TOKEN:-}
       # 认证配置 - 生产环境必须修改这些值！
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
@@ -113,6 +115,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - SAFELINE_TAG=${SAFELINE_TAG:-main}
       - UPDATER_SHARED_SECRET=${UPDATER_SHARED_SECRET:-}
+      - UPDATER_SHARED_TOKEN=${UPDATER_SHARED_TOKEN:-}
       - UPDATER_WORKDIR=${UPDATER_WORKSPACE_DIR:-/opt/safeline-waf}
       - UPDATER_STATE_DIR=/data
       - UPDATER_RUNNER_STATE_DIR=${UPDATER_WORKSPACE_DIR:-/opt/safeline-waf}/data/updater

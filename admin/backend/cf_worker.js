@@ -172,6 +172,73 @@ class CfApiClient {
   }
 }
 
+async function applySecurityLevelToZones(client, zoneIds, targetLevel, options = {}) {
+  const normalizedZoneIds = Array.from(new Set(
+    (Array.isArray(zoneIds) ? zoneIds : [])
+      .map((zoneId) => String(zoneId || '').trim())
+      .filter(Boolean)
+  ));
+
+  const updatedZones = [];
+  const errors = [];
+
+  for (const zoneId of normalizedZoneIds) {
+    try {
+      const current = await client.getSecurityLevel(zoneId);
+      const previousLevel = current && typeof current.value === 'string'
+        ? current.value
+        : null;
+
+      if (previousLevel === targetLevel) {
+        updatedZones.push({
+          zone: zoneId,
+          previous_level: previousLevel,
+          target_level: targetLevel,
+          changed: false
+        });
+        continue;
+      }
+
+      await client.setSecurityLevel(zoneId, targetLevel);
+      updatedZones.push({
+        zone: zoneId,
+        previous_level: previousLevel,
+        target_level: targetLevel,
+        changed: true
+      });
+    } catch (error) {
+      errors.push({
+        zone: zoneId,
+        error: error.message || String(error)
+      });
+    }
+  }
+
+  const rollbackErrors = [];
+  if (errors.length > 0 && options.rollbackOnFailure !== false) {
+    for (const zoneResult of updatedZones.filter((item) => item.changed && item.previous_level).reverse()) {
+      try {
+        await client.setSecurityLevel(zoneResult.zone, zoneResult.previous_level);
+        zoneResult.rolled_back = true;
+      } catch (rollbackError) {
+        rollbackErrors.push({
+          zone: zoneResult.zone,
+          rollback_target: zoneResult.previous_level,
+          error: rollbackError.message || String(rollbackError)
+        });
+      }
+    }
+  }
+
+  return {
+    success: errors.length === 0 && rollbackErrors.length === 0,
+    target_level: targetLevel,
+    updated_zones: updatedZones,
+    errors,
+    rollback_errors: rollbackErrors
+  };
+}
+
 // ── Worker ───────────────────────────────────────────────────────────────────
 class CfShieldWorker {
   constructor(redis, jwtSecret, intervalMs = 15000) {
@@ -253,37 +320,68 @@ class CfShieldWorker {
     if (!state.active && score >= activateThreshold) {
       // ── ACTIVATE ────────────────────────────────────────────────────────
       console.log(`[CF] Score ${score} >= threshold ${activateThreshold} — activating Under Attack Mode`);
-      const errors = [];
-      for (const zoneId of cfg.zone_ids) {
-        try {
-          await client.setSecurityLevel(zoneId, 'under_attack');
-          console.log(`[CF] Zone ${zoneId} → under_attack`);
-        } catch (e) {
-          console.error(`[CF] Zone ${zoneId} activate error:`, e.message);
-          errors.push({ zone: zoneId, error: e.message });
-        }
+      const applyResult = await applySecurityLevelToZones(client, cfg.zone_ids, 'under_attack');
+      applyResult.errors.forEach((item) => {
+        console.error(`[CF] Zone ${item.zone} activate error:`, item.error);
+      });
+      applyResult.updated_zones
+        .filter((item) => item.changed)
+        .forEach((item) => console.log(`[CF] Zone ${item.zone} → under_attack`));
+
+      if (!applyResult.success) {
+        const failureEntry = {
+          type: 'activate_failed',
+          at: now,
+          score,
+          reason: 'auto',
+          errors: applyResult.errors,
+          rollback_errors: applyResult.rollback_errors,
+          updated_zones: applyResult.updated_zones
+        };
+        await redis.lpush('cf:history', JSON.stringify(failureEntry));
+        await redis.ltrim('cf:history', 0, 499);
+        return;
       }
 
       const newState = { active: true, activated_at: now, score_at_activation: score };
       await redis.set('cf:state', JSON.stringify(newState));
       await syncAttackTelemetry(redis, { score, peak: Math.max(peak, score), last_attack_at: now }, now);
 
-      const entry = { type: 'activate', at: now, score, reason: 'auto', errors };
+      const entry = {
+        type: 'activate',
+        at: now,
+        score,
+        reason: 'auto',
+        errors: [],
+        updated_zones: applyResult.updated_zones
+      };
       await redis.lpush('cf:history', JSON.stringify(entry));
       await redis.ltrim('cf:history', 0, 499);
 
     } else if (state.active && score <= deactivateThreshold && now > cooldownTs) {
       // ── DEACTIVATE ──────────────────────────────────────────────────────
       console.log(`[CF] Score ${score} <= threshold ${deactivateThreshold} — deactivating (back to ${normalLevel})`);
-      const errors = [];
-      for (const zoneId of cfg.zone_ids) {
-        try {
-          await client.setSecurityLevel(zoneId, normalLevel);
-          console.log(`[CF] Zone ${zoneId} → ${normalLevel}`);
-        } catch (e) {
-          console.error(`[CF] Zone ${zoneId} deactivate error:`, e.message);
-          errors.push({ zone: zoneId, error: e.message });
-        }
+      const applyResult = await applySecurityLevelToZones(client, cfg.zone_ids, normalLevel);
+      applyResult.errors.forEach((item) => {
+        console.error(`[CF] Zone ${item.zone} deactivate error:`, item.error);
+      });
+      applyResult.updated_zones
+        .filter((item) => item.changed)
+        .forEach((item) => console.log(`[CF] Zone ${item.zone} → ${normalLevel}`));
+
+      if (!applyResult.success) {
+        const failureEntry = {
+          type: 'deactivate_failed',
+          at: now,
+          score,
+          reason: 'auto',
+          errors: applyResult.errors,
+          rollback_errors: applyResult.rollback_errors,
+          updated_zones: applyResult.updated_zones
+        };
+        await redis.lpush('cf:history', JSON.stringify(failureEntry));
+        await redis.ltrim('cf:history', 0, 499);
+        return;
       }
 
       const newState = { active: false, deactivated_at: now, score_at_deactivation: score };
@@ -291,7 +389,14 @@ class CfShieldWorker {
       // Set cooldown to prevent immediate re-activation
       await redis.set('cf:cooldown_until', String(now + cooldownMs));
 
-      const entry = { type: 'deactivate', at: now, score, reason: 'auto', errors };
+      const entry = {
+        type: 'deactivate',
+        at: now,
+        score,
+        reason: 'auto',
+        errors: [],
+        updated_zones: applyResult.updated_zones
+      };
       await redis.lpush('cf:history', JSON.stringify(entry));
       await redis.ltrim('cf:history', 0, 499);
     }
@@ -303,6 +408,7 @@ module.exports = {
   encryptToken,
   decryptToken,
   CfApiClient,
+  applySecurityLevelToZones,
   CfShieldWorker,
   readAttackTelemetry,
   syncAttackTelemetry,

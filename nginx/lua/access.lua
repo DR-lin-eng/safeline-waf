@@ -214,6 +214,28 @@ local function normalize_site_config(raw)
         end
     end
 
+    local sampling_cfg = get_global_config("sampling", {})
+    if normalized.request_sampling_enabled == nil then
+        normalized.request_sampling_enabled = sampling_cfg.enabled == true
+    end
+    if normalized.sampling_rate == nil then
+        normalized.sampling_rate = tonumber(sampling_cfg.rate) or 0.01
+    end
+    if normalized.log_sample_rate == nil then
+        normalized.log_sample_rate = tonumber(normalized.sampling_rate) or tonumber(sampling_cfg.rate) or 0.01
+    end
+    if normalized.anomaly_threshold == nil then
+        normalized.anomaly_threshold = tonumber(sampling_cfg.anomaly_threshold) or 5.0
+    end
+
+    local honeypot_cfg = get_global_config("honeypot_settings", {})
+    if normalized.honeypot_enabled == nil then
+        normalized.honeypot_enabled = honeypot_cfg.enabled ~= false
+    end
+    if normalized.honeypot_traps == nil and type(honeypot_cfg.traps) == "table" then
+        normalized.honeypot_traps = honeypot_cfg.traps
+    end
+
     return normalized
 end
 
@@ -1309,7 +1331,12 @@ local function process_waf()
     
     -- 检查蜜罐触发
     if site_config.honeypot_enabled then
-        local is_honeypot, trap_type = utils.check_honeypot_trap(uri, ngx.req.get_uri_args(), ngx.req.get_headers())
+        local is_honeypot, trap_type = utils.check_honeypot_trap(
+            uri,
+            ngx.req.get_uri_args(),
+            ngx.req.get_headers(),
+            site_config.honeypot_traps
+        )
         if is_honeypot then
             ngx.log(ngx.WARN, "Honeypot triggered by " .. client_ip .. ": " .. trap_type)
 

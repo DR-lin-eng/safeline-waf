@@ -19,6 +19,7 @@ const {
   encryptToken,
   decryptToken,
   CfApiClient,
+  applySecurityLevelToZones,
   readAttackTelemetry,
   ATTACK_PEAK_KEY,
   LEGACY_PEAK_KEY,
@@ -44,18 +45,71 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
     ));
   }
 
+  async function readStoredConfig() {
+    const raw = await redis.get('cf:config');
+    return raw ? JSON.parse(raw) : {};
+  }
+
+  function buildConfigCandidate(input = {}, existing = {}) {
+    const draft = input && typeof input === 'object' ? input : {};
+    let api_token_enc = existing.api_token_enc || '';
+
+    if (draft.api_token && String(draft.api_token).trim() && !String(draft.api_token).startsWith('••')) {
+      api_token_enc = encryptToken(String(draft.api_token).trim(), jwtSecret);
+    }
+
+    const resolvedAuthType = draft.auth_type !== undefined
+      ? (draft.auth_type === 'global_key' ? 'global_key' : 'token')
+      : (existing.auth_type === 'global_key' ? 'global_key' : 'token');
+    const resolvedAuthEmail = resolvedAuthType === 'global_key'
+      ? String(draft.auth_email !== undefined ? draft.auth_email : (existing.auth_email || '')).trim()
+      : '';
+
+    return {
+      api_token_enc,
+      auth_type: resolvedAuthType,
+      auth_email: resolvedAuthEmail,
+      zone_ids: sanitizeZoneIds(draft.zone_ids, existing.zone_ids || []),
+      enabled: draft.enabled !== undefined ? !!draft.enabled : !!existing.enabled,
+      activate_threshold: Number(draft.activate_threshold) || existing.activate_threshold || 50,
+      deactivate_threshold: Number(draft.deactivate_threshold) || existing.deactivate_threshold || 10,
+      cooldown_s: Number(draft.cooldown_s) || existing.cooldown_s || 300,
+      normal_security_level: draft.normal_security_level || existing.normal_security_level || 'medium',
+      timeout_ms: Number(draft.timeout_ms) || existing.timeout_ms || 10000
+    };
+  }
+
+  function maskConfig(cfg) {
+    const out = { ...cfg };
+    if (out.api_token_enc) {
+      out.api_token_masked = '••••••••' + out.api_token_enc.slice(-4);
+      delete out.api_token_enc;
+    }
+    return out;
+  }
+
+  function resolveClientFromConfig(cfg) {
+    if (!cfg || !cfg.api_token_enc) {
+      throw new Error('API token not configured');
+    }
+
+    const token = decryptToken(cfg.api_token_enc, jwtSecret);
+    if (!token) {
+      throw new Error('Failed to decrypt API token');
+    }
+
+    if (cfg.auth_type === 'global_key' && !String(cfg.auth_email || '').trim()) {
+      throw new Error('auth_email is required when auth_type is global_key');
+    }
+
+    return new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
+  }
+
   // ── GET /cf/config ─────────────────────────────────────────────────────────
   router.get('/cf/config', async (_req, res) => {
     try {
-      const raw = await redis.get('cf:config');
-      if (!raw) return ok(res, {});
-      const cfg = JSON.parse(raw);
-      const out = { ...cfg };
-      if (out.api_token_enc) {
-        out.api_token_masked = '••••••••' + out.api_token_enc.slice(-4);
-        delete out.api_token_enc;
-      }
-      return ok(res, out);
+      const cfg = await readStoredConfig();
+      return ok(res, maskConfig(cfg));
     } catch (e) {
       return fail(res, 500, e.message);
     }
@@ -70,45 +124,26 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
         cooldown_s, normal_security_level, timeout_ms,
       } = req.body;
 
-      const existingRaw = await redis.get('cf:config');
-      const existing    = existingRaw ? JSON.parse(existingRaw) : {};
+      const existing = await readStoredConfig();
+      const cfg = buildConfigCandidate({
+        api_token,
+        auth_type,
+        auth_email,
+        zone_ids,
+        enabled,
+        activate_threshold,
+        deactivate_threshold,
+        cooldown_s,
+        normal_security_level,
+        timeout_ms
+      }, existing);
 
-      let api_token_enc = existing.api_token_enc || '';
-      if (api_token && api_token.trim() && !api_token.startsWith('••')) {
-        api_token_enc = encryptToken(api_token.trim(), jwtSecret);
-      }
-
-      const resolvedAuthType = auth_type === 'global_key' ? 'global_key' : 'token';
-      const resolvedAuthEmail = resolvedAuthType === 'global_key'
-        ? String(auth_email || existing.auth_email || '').trim()
-        : '';
-
-      if (resolvedAuthType === 'global_key' && !resolvedAuthEmail) {
+      if (cfg.auth_type === 'global_key' && !cfg.auth_email) {
         return fail(res, 400, 'auth_email is required when auth_type is global_key');
       }
 
-      const cfg = {
-        api_token_enc,
-        auth_type:              resolvedAuthType,
-        auth_email:             resolvedAuthEmail,
-        zone_ids:               sanitizeZoneIds(zone_ids, existing.zone_ids || []),
-        enabled:                enabled !== undefined ? !!enabled : !!existing.enabled,
-        activate_threshold:     Number(activate_threshold)   || existing.activate_threshold   || 50,
-        deactivate_threshold:   Number(deactivate_threshold) || existing.deactivate_threshold || 10,
-        cooldown_s:             Number(cooldown_s)           || existing.cooldown_s           || 300,
-        normal_security_level:  normal_security_level        || existing.normal_security_level || 'medium',
-        timeout_ms:             Number(timeout_ms)           || existing.timeout_ms           || 10000,
-      };
-
       await redis.set('cf:config', JSON.stringify(cfg));
-
-      // Return masked copy
-      const out = { ...cfg };
-      if (out.api_token_enc) {
-        out.api_token_masked = '••••••••' + out.api_token_enc.slice(-4);
-        delete out.api_token_enc;
-      }
-      return ok(res, out);
+      return ok(res, maskConfig(cfg));
     } catch (e) {
       return fail(res, 500, e.message);
     }
@@ -164,30 +199,25 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
   });
 
   // ── GET /cf/zones ──────────────────────────────────────────────────────────
-  router.get('/cf/zones', async (_req, res) => {
+  async function handleListZones(input, res) {
     try {
-      const raw = await redis.get('cf:config');
-      if (!raw) return fail(res, 400, 'CF config not set');
-      const cfg = JSON.parse(raw);
-      if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
-      const token = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
-      const zones  = await client.listZones();
+      const cfg = buildConfigCandidate(input, await readStoredConfig());
+      const client = resolveClientFromConfig(cfg);
+      const zones = await client.listZones();
       return ok(res, zones);
     } catch (e) {
       return fail(res, 500, e.message);
     }
-  });
+  }
+
+  router.get('/cf/zones', async (_req, res) => handleListZones({}, res));
+  router.post('/cf/zones', async (req, res) => handleListZones(req.body || {}, res));
 
   // ── POST /cf/test ─────────────────────���────────────────────────────────────
-  router.post('/cf/test', async (_req, res) => {
+  router.post('/cf/test', async (req, res) => {
     try {
-      const raw = await redis.get('cf:config');
-      if (!raw) return fail(res, 400, 'CF config not set');
-      const cfg = JSON.parse(raw);
-      if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
-      const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
+      const cfg = buildConfigCandidate(req.body || {}, await readStoredConfig());
+      const client = resolveClientFromConfig(cfg);
       try {
         const zones = await client.listZones();
         return ok(res, { connected: true, zones_found: zones.length });
@@ -202,34 +232,36 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
   // ── POST /cf/shield/enable ────────────────────────────────────────────��────
   router.post('/cf/shield/enable', async (_req, res) => {
     try {
-      const raw = await redis.get('cf:config');
-      if (!raw) return fail(res, 400, 'CF config not set');
-      const cfg = JSON.parse(raw);
+      const cfg = await readStoredConfig();
       if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
       if (!cfg.zone_ids || cfg.zone_ids.length === 0) return fail(res, 400, 'No Zone IDs configured');
 
-      const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
-      const errors = [];
-
-      for (const zoneId of cfg.zone_ids) {
-        try {
-          await client.setSecurityLevel(zoneId, 'under_attack');
-        } catch (e) {
-          errors.push({ zone: zoneId, error: e.message });
-        }
-      }
+      const client = resolveClientFromConfig(cfg);
+      const applyResult = await applySecurityLevelToZones(client, cfg.zone_ids, 'under_attack');
 
       const now = Date.now();
-      const state = { active: true, activated_at: now, manual: true };
-      await redis.set('cf:state', JSON.stringify(state));
-
-      // Record history
-      const entry = { type: 'activate', at: now, reason: 'manual', errors };
+      const entry = {
+        type: applyResult.success ? 'activate' : 'activate_failed',
+        at: now,
+        reason: 'manual',
+        errors: applyResult.errors,
+        rollback_errors: applyResult.rollback_errors,
+        updated_zones: applyResult.updated_zones
+      };
       await redis.lpush('cf:history', JSON.stringify(entry));
       await redis.ltrim('cf:history', 0, 499);
 
-      return ok(res, { activated: true, errors });
+      if (!applyResult.success) {
+        return res.status(502).json({
+          code: 502,
+          message: 'Failed to enable Cloudflare shield for all zones',
+          details: applyResult
+        });
+      }
+
+      const state = { active: true, activated_at: now, manual: true };
+      await redis.set('cf:state', JSON.stringify(state));
+      return ok(res, { activated: true, updated_zones: applyResult.updated_zones });
     } catch (e) {
       return fail(res, 500, e.message);
     }
@@ -238,36 +270,38 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
   // ── POST /cf/shield/disable ────────────────────────────────────────────────
   router.post('/cf/shield/disable', async (_req, res) => {
     try {
-      const raw = await redis.get('cf:config');
-      if (!raw) return fail(res, 400, 'CF config not set');
-      const cfg = JSON.parse(raw);
+      const cfg = await readStoredConfig();
       if (!cfg.api_token_enc) return fail(res, 400, 'API token not configured');
       if (!cfg.zone_ids || cfg.zone_ids.length === 0) return fail(res, 400, 'No Zone IDs configured');
 
-      const token  = decryptToken(cfg.api_token_enc, jwtSecret);
-      const client = new CfApiClient(token, cfg.timeout_ms || 10000, cfg.auth_type, cfg.auth_email);
-      const level  = cfg.normal_security_level || 'medium';
-      const errors = [];
-
-      for (const zoneId of cfg.zone_ids) {
-        try {
-          await client.setSecurityLevel(zoneId, level);
-        } catch (e) {
-          errors.push({ zone: zoneId, error: e.message });
-        }
-      }
+      const level = cfg.normal_security_level || 'medium';
+      const client = resolveClientFromConfig(cfg);
+      const applyResult = await applySecurityLevelToZones(client, cfg.zone_ids, level);
 
       const now = Date.now();
-      const state = { active: false, deactivated_at: now, manual: true };
-      await redis.set('cf:state', JSON.stringify(state));
-      // Reset cooldown so worker doesn't re-trigger immediately
-      await redis.set('cf:cooldown_until', String(now + (cfg.cooldown_s || 300) * 1000));
-
-      const entry = { type: 'deactivate', at: now, reason: 'manual', errors };
+      const entry = {
+        type: applyResult.success ? 'deactivate' : 'deactivate_failed',
+        at: now,
+        reason: 'manual',
+        errors: applyResult.errors,
+        rollback_errors: applyResult.rollback_errors,
+        updated_zones: applyResult.updated_zones
+      };
       await redis.lpush('cf:history', JSON.stringify(entry));
       await redis.ltrim('cf:history', 0, 499);
 
-      return ok(res, { deactivated: true, errors });
+      if (!applyResult.success) {
+        return res.status(502).json({
+          code: 502,
+          message: 'Failed to disable Cloudflare shield for all zones',
+          details: applyResult
+        });
+      }
+
+      const state = { active: false, deactivated_at: now, manual: true };
+      await redis.set('cf:state', JSON.stringify(state));
+      await redis.set('cf:cooldown_until', String(now + (cfg.cooldown_s || 300) * 1000));
+      return ok(res, { deactivated: true, updated_zones: applyResult.updated_zones });
     } catch (e) {
       return fail(res, 500, e.message);
     }

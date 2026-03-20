@@ -13,7 +13,6 @@ const PORT = parseInt(process.env.PORT || '3400', 10);
 const SHARED_SECRET = String(
   process.env.UPDATER_SHARED_SECRET
   || process.env.UPDATER_SHARED_TOKEN
-  || process.env.JWT_SECRET
   || ''
 );
 const DOCKER_SOCKET = process.env.UPDATER_DOCKER_SOCKET || '/var/run/docker.sock';
@@ -40,6 +39,26 @@ const RUNNER_STATE_DIR = String(
 ).trim();
 
 app.use(express.json({ limit: '32kb' }));
+
+function getRuntimeMode(composeFile) {
+  return String(composeFile || '').endsWith('.prod.yml') ? 'prod' : 'source';
+}
+
+function getRunnerDockerFlags(composeFile) {
+  const mode = getRuntimeMode(composeFile);
+  const pullImages = process.env.UPDATER_DOCKER_PULL !== undefined
+    ? process.env.UPDATER_DOCKER_PULL !== 'false'
+    : mode === 'prod';
+  const buildServices = process.env.UPDATER_DOCKER_BUILD !== undefined
+    ? process.env.UPDATER_DOCKER_BUILD === 'true'
+    : mode === 'source';
+
+  return { mode, pullImages, buildServices };
+}
+
+function buildExpectedContainers(services = SERVICE_LIST) {
+  return services.map((service) => `safeline-waf-${service}`);
+}
 
 function timingSafeEqualString(left, right) {
   const leftBuffer = Buffer.from(String(left || ''), 'utf8');
@@ -224,6 +243,8 @@ async function readRepoInfo(hostWorkdir) {
     branch: null,
     commit: null,
     short_commit: null,
+    deployed_commit: null,
+    deployed_short_commit: null,
     dirty: null
   };
 
@@ -231,16 +252,27 @@ async function readRepoInfo(hostWorkdir) {
     await runCommand('git', ['rev-parse', '--is-inside-work-tree']);
     info.is_git_repo = true;
 
-    const [branchResult, commitResult, shortCommitResult, dirtyResult] = await Promise.all([
+    const [
+      branchResult,
+      commitResult,
+      shortCommitResult,
+      dirtyResult,
+      deployedCommitResult,
+      deployedShortCommitResult
+    ] = await Promise.all([
       runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD']),
       runCommand('git', ['rev-parse', 'HEAD']),
       runCommand('git', ['rev-parse', '--short', 'HEAD']),
-      runCommand('git', ['status', '--porcelain'])
+      runCommand('git', ['status', '--porcelain']),
+      runCommand('git', ['rev-parse', '--verify', 'refs/safeline/online-update']).catch(() => ({ stdout: '' })),
+      runCommand('git', ['rev-parse', '--short', '--verify', 'refs/safeline/online-update']).catch(() => ({ stdout: '' }))
     ]);
 
     info.branch = branchResult.stdout || null;
     info.commit = commitResult.stdout || null;
     info.short_commit = shortCommitResult.stdout || null;
+    info.deployed_commit = deployedCommitResult.stdout || null;
+    info.deployed_short_commit = deployedShortCommitResult.stdout || null;
     info.dirty = Boolean(dirtyResult.stdout);
   } catch (_error) {
     return info;
@@ -266,17 +298,25 @@ async function buildStatus() {
   const runnerState = await inspectRunnerContainer(persistedState.runner_container);
   const repo = await readRepoInfo(hostWorkdir);
   const logTail = await readLogTail(LOG_FILE);
-  const running = normalizedStatus === 'running'
-    && (!runnerState || runnerState.Status === 'running' || runnerState.Status === 'created');
-  const mode = composeFile.endsWith('.prod.yml') ? 'prod' : 'source';
+  const statusFromState = normalizedStatus === 'queued' ? 'running' : normalizedStatus;
+  const runnerMissing = statusFromState === 'running'
+    && Boolean(persistedState.runner_container)
+    && !runnerState;
+  const effectiveStatus = runnerMissing ? 'failed' : statusFromState;
+  const running = effectiveStatus === 'running'
+    && !!runnerState
+    && (runnerState.Status === 'running' || runnerState.Status === 'created');
+  const dockerFlags = getRunnerDockerFlags(composeFile);
 
   return {
     enabled: configured,
     available: configured,
     message: configured
-      ? (persistedState.message || null)
+      ? (runnerMissing
+        ? 'Updater runner container disappeared before the job completed'
+        : (persistedState.message || null))
       : 'Unable to determine host workspace mount or updater secret',
-    status: normalizedStatus,
+    status: effectiveStatus,
     phase: persistedState.phase || 'idle',
     running,
     current_job_id: persistedState.job_id || null,
@@ -292,17 +332,23 @@ async function buildStatus() {
     git_branch: GIT_BRANCH,
     runner_container: persistedState.runner_container || null,
     runner_status: runnerState ? runnerState.Status || null : null,
-    error: persistedState.error || null,
+    error: runnerMissing
+      ? (persistedState.error || 'Runner container missing')
+      : (persistedState.error || null),
     repo,
     runtime: {
-      mode,
+      mode: dockerFlags.mode,
       image_tag: IMAGE_TAG,
       compose_file: composeFile,
       services: SERVICE_LIST,
+      docker_pull: dockerFlags.pullImages,
+      docker_build: dockerFlags.buildServices,
       git: {
         branch: repo.branch || null,
         commit: repo.commit || null,
         commit_short: repo.short_commit || null,
+        deployed_commit: repo.deployed_commit || null,
+        deployed_commit_short: repo.deployed_short_commit || null,
         dirty: Boolean(repo.dirty)
       }
     },
@@ -312,9 +358,11 @@ async function buildStatus() {
 
 async function launchRunner(jobId, requestedBy, composeFile, hostWorkdir) {
   const containerName = `${RUNNER_CONTAINER_PREFIX}-${jobId}`.toLowerCase();
+  const dockerFlags = getRunnerDockerFlags(composeFile);
+  const expectedContainers = buildExpectedContainers(SERVICE_LIST);
   const initialState = {
     job_id: jobId,
-    status: 'queued',
+    status: 'running',
     phase: 'queued',
     message: 'Update has been queued',
     requested_at: new Date().toISOString(),
@@ -323,6 +371,8 @@ async function launchRunner(jobId, requestedBy, composeFile, hostWorkdir) {
     runner_container: containerName,
     runner_image: RUNNER_IMAGE,
     pull_source: PULL_SOURCE,
+    pull_images: dockerFlags.pullImages,
+    build_services: dockerFlags.buildServices,
     git_remote: GIT_REMOTE,
     git_branch: GIT_BRANCH,
     error: null
@@ -357,11 +407,17 @@ async function launchRunner(jobId, requestedBy, composeFile, hostWorkdir) {
     '-e',
     `RUNNER_PULL_SOURCE=${PULL_SOURCE ? 'true' : 'false'}`,
     '-e',
+    `RUNNER_DOCKER_PULL=${dockerFlags.pullImages ? 'true' : 'false'}`,
+    '-e',
+    `RUNNER_DOCKER_BUILD=${dockerFlags.buildServices ? 'true' : 'false'}`,
+    '-e',
     `RUNNER_GIT_REMOTE=${GIT_REMOTE}`,
     '-e',
     `RUNNER_GIT_BRANCH=${GIT_BRANCH}`,
     '-e',
-    'RUNNER_EXPECTED_CONTAINERS=safeline-waf-nginx,safeline-waf-redis,safeline-waf-admin-backend,safeline-waf-admin-frontend,safeline-waf-admin-updater',
+    `RUNNER_SERVICES=${SERVICE_LIST.join(',')}`,
+    '-e',
+    `RUNNER_EXPECTED_CONTAINERS=${expectedContainers.join(',')}`,
     RUNNER_IMAGE,
     'node',
     '/app/runner.js'
@@ -417,6 +473,14 @@ app.post('/run', async (req, res) => {
       return res.status(409).json({
         success: false,
         message: 'An update is already running',
+        data: currentStatus
+      });
+    }
+
+    if (PULL_SOURCE && currentStatus.repo && currentStatus.repo.dirty) {
+      return res.status(409).json({
+        success: false,
+        message: 'Refusing to run source-mode update with a dirty worktree',
         data: currentStatus
       });
     }

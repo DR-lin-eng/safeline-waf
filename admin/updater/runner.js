@@ -26,6 +26,11 @@ const EXPECTED_CONTAINERS = String(
   .map((item) => item.trim())
   .filter(Boolean);
 const SAFE_SYNC_PATHS = ['admin', 'nginx', 'scripts', 'docker-compose.yml', 'docker-compose.prod.yml'];
+const COMMAND_TIMEOUT_MS = Math.max(
+  60000,
+  parseInt(process.env.RUNNER_COMMAND_TIMEOUT_MS || '900000', 10) || 900000
+);
+const UPDATE_TRACKING_REF = String(process.env.RUNNER_GIT_TRACKING_REF || 'refs/safeline/online-update').trim();
 
 let currentState = {
   job_id: JOB_ID,
@@ -106,6 +111,7 @@ async function runCommand(command, args, options = {}) {
   await appendLog(`$ ${command} ${args.join(' ')}`);
 
   return new Promise((resolve, reject) => {
+    const timeoutMs = Math.max(1000, parseInt(options.timeoutMs || COMMAND_TIMEOUT_MS, 10) || COMMAND_TIMEOUT_MS);
     const child = spawn(command, args, {
       cwd: options.cwd || WORKDIR,
       env: {
@@ -116,6 +122,8 @@ async function runCommand(command, args, options = {}) {
     });
 
     let output = '';
+    let timeoutHandle = null;
+    let timedOut = false;
 
     const handleChunk = (chunk, streamName) => {
       const text = String(chunk || '');
@@ -128,10 +136,31 @@ async function runCommand(command, args, options = {}) {
         });
     };
 
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      appendLog(`timeout> ${command} exceeded ${timeoutMs}ms`).catch(() => {});
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5000).unref();
+    }, timeoutMs);
+
     child.stdout.on('data', (chunk) => handleChunk(chunk, 'stdout'));
     child.stderr.on('data', (chunk) => handleChunk(chunk, 'stderr'));
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      reject(error);
+    });
     child.on('close', (code) => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+
+      if (timedOut) {
+        reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+        return;
+      }
+
       if (code === 0) {
         resolve(output.trim());
         return;
@@ -181,6 +210,11 @@ async function inspectContainer(name) {
   }
 }
 
+async function resolveDiffBaseRef() {
+  const hasTrackingRef = await commandSucceeds('git', ['rev-parse', '--verify', UPDATE_TRACKING_REF]);
+  return hasTrackingRef ? UPDATE_TRACKING_REF : 'HEAD';
+}
+
 async function waitForContainers(timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let lastSnapshot = [];
@@ -221,11 +255,12 @@ async function syncSourceFromRemote() {
 
   await runCommand('git', ['fetch', GIT_REMOTE, GIT_BRANCH]);
 
+  const baseRef = await resolveDiffBaseRef();
   const targetCommit = await runCommand('git', ['rev-parse', '--short', 'FETCH_HEAD']);
   const diffOutput = await runCommand('git', [
     'diff',
     '--name-status',
-    'HEAD',
+    baseRef,
     'FETCH_HEAD',
     '--',
     ...SAFE_SYNC_PATHS
@@ -277,9 +312,13 @@ async function syncSourceFromRemote() {
     await appendLog(`deleted> ${relativePath}`);
   }
 
+  await runCommand('git', ['update-ref', UPDATE_TRACKING_REF, 'FETCH_HEAD']);
+
   return {
     skipped: false,
     branch: GIT_BRANCH,
+    base_ref: baseRef,
+    tracking_ref: UPDATE_TRACKING_REF,
     commit: targetCommit || null,
     changed_files: checkoutPaths.size,
     deleted_files: deletePaths.size

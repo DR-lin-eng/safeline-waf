@@ -146,8 +146,8 @@
             <tbody>
               <tr v-for="(item, idx) in history" :key="idx">
                 <td>
-                  <span class="badge" :class="item.type === 'activate' ? 'badge-danger' : 'badge-success'">
-                    {{ item.type === 'activate' ? '🔴 激活' : '🟢 关闭' }}
+                  <span class="badge" :class="historyTypeClass(item)">
+                    {{ historyTypeLabel(item) }}
                   </span>
                 </td>
                 <td class="text-nowrap">{{ formatTime(item.at) }}</td>
@@ -446,22 +446,18 @@ export default {
       this.saveLoading = true;
       this.saveError = '';
       try {
-        const payload = { ...this.editConfig };
-        // Merge manually-typed zone IDs from textarea
-        const textZones = this.zoneIdsText.split('\n').map(s => s.trim()).filter(Boolean);
-        payload.zone_ids = textZones.length ? textZones : this.editConfig.zone_ids;
-        payload.auth_email = payload.auth_type === 'global_key'
-          ? (payload.auth_email || '').trim()
-          : '';
+        const payload = this.buildConfigPayload();
         if (payload.auth_type === 'global_key' && !payload.auth_email) {
           this.saveError = 'Global API Key 模式需要填写 Auth Email';
           this.saveLoading = false;
           return;
         }
+        this.zoneIdsText = payload.zone_ids.join('\n');
         const r = await api.put('/cf/config', payload);
         if (r.data.success) {
           this.cfConfig = r.data.data;
           this.showConfigModal = false;
+          await this.loadConfig();
           await this.loadStatus();
         } else {
           this.saveError = r.data.message || '保存失败';
@@ -475,7 +471,7 @@ export default {
       this.zonesLoading = true;
       this.testResult = null;
       try {
-        const r = await api.get('/cf/zones');
+        const r = await api.post('/cf/zones', this.buildConfigPayload());
         if (r.data.success) {
           this.availableZones = r.data.data || [];
         }
@@ -488,7 +484,7 @@ export default {
       this.testLoading = true;
       this.testResult = null;
       try {
-        const r = await api.post('/cf/test');
+        const r = await api.post('/cf/test', this.buildConfigPayload());
         this.testResult = r.data.data || r.data;
       } catch (e) {
         this.testResult = { connected: false, error: e.response?.data?.message || e.message };
@@ -542,6 +538,34 @@ export default {
     syncZoneIds() {
       const lines = this.zoneIdsText.split('\n').map(s => s.trim()).filter(Boolean);
       this.editConfig.zone_ids = lines;
+    },
+    buildConfigPayload() {
+      const payload = { ...this.editConfig };
+      const selectedZones = Array.isArray(this.editConfig.zone_ids)
+        ? Array.from(new Set(this.editConfig.zone_ids.map(s => String(s || '').trim()).filter(Boolean)))
+        : [];
+      const textZones = this.zoneIdsText
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean);
+      payload.zone_ids = selectedZones.length ? selectedZones : textZones;
+      payload.auth_email = payload.auth_type === 'global_key'
+        ? (payload.auth_email || '').trim()
+        : '';
+      return payload;
+    },
+    historyTypeClass(item) {
+      if (item && item.type === 'activate') return 'badge-danger';
+      if (item && item.type === 'deactivate') return 'badge-success';
+      return 'badge-warning';
+    },
+    historyTypeLabel(item) {
+      if (!item || !item.type) return '⚪ 未知';
+      if (item.type === 'activate') return '🔴 激活';
+      if (item.type === 'deactivate') return '🟢 关闭';
+      if (item.type === 'activate_failed') return '🟠 激活失败';
+      if (item.type === 'deactivate_failed') return '🟠 关闭失败';
+      return item.type;
     },
     formatTime(ts) {
       if (!ts) return '-';

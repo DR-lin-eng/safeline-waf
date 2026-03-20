@@ -83,6 +83,13 @@ redis.on('error', (err) => console.error('[Redis] Connection error:', err.messag
 
 // Long-lived inter-node cluster token (uses same JWT_SECRET — valid for 365 days)
 const CLUSTER_TOKEN = jwt.sign({ username: '_cluster', role: 'cluster' }, JWT_SECRET, { expiresIn: '365d' });
+const INTERNAL_CLUSTER_PATHS = new Set([
+  'GET /cluster/config',
+  'POST /cluster/register',
+  'POST /cluster/heartbeat',
+  'POST /cluster/sync/config',
+  'POST /cluster/sync/blacklist'
+]);
 
 // Initialize cluster manager
 const clusterManager = new ClusterManager();
@@ -176,40 +183,61 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   });
 });
 
-// JWT authentication middleware
-const authMiddleware = (req, res, next) => {
-  if (req.method === 'OPTIONS') return next();
+function verifyBearerToken(req, invalidMessage = 'Invalid or expired token') {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return sendError(res, 401, 'Unauthorized');
+    return { ok: false, status: 401, message: 'Unauthorized' };
   }
-  const token = authHeader.slice(7);
+
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch (_) {
-    return sendError(res, 401, 'Invalid or expired token');
+    return {
+      ok: true,
+      decoded: jwt.verify(authHeader.slice(7), JWT_SECRET)
+    };
+  } catch (_error) {
+    return { ok: false, status: 401, message: invalidMessage };
   }
+}
+
+function isInternalClusterRequest(req) {
+  const pathName = String(req.path || req.originalUrl || '')
+    .replace(/^\/api/, '')
+    .replace(/\?.*$/, '');
+  return INTERNAL_CLUSTER_PATHS.has(`${req.method} ${pathName}`);
+}
+
+// JWT authentication middleware
+const authMiddleware = (req, res, next) => {
+  if (req.method === 'OPTIONS' || isInternalClusterRequest(req)) return next();
+
+  const verified = verifyBearerToken(req);
+  if (!verified.ok) {
+    return sendError(res, verified.status, verified.message);
+  }
+
+  if (!verified.decoded || verified.decoded.role !== 'administrator') {
+    return sendError(res, 403, 'Forbidden: administrator token required');
+  }
+
+  req.user = verified.decoded;
+  next();
 };
 
 // Cluster token authentication middleware (for inter-node communication)
 const clusterAuthMiddleware = (req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return sendError(res, 401, 'Unauthorized');
+
+  const verified = verifyBearerToken(req, 'Invalid or expired cluster token');
+  if (!verified.ok) {
+    return sendError(res, verified.status, verified.message);
   }
-  const token = authHeader.slice(7);
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'cluster') {
-      return sendError(res, 403, 'Forbidden: cluster token required');
-    }
-    req.user = decoded;
-    next();
-  } catch (_) {
-    return sendError(res, 401, 'Invalid or expired cluster token');
+
+  if (!verified.decoded || verified.decoded.role !== 'cluster') {
+    return sendError(res, 403, 'Forbidden: cluster token required');
   }
+
+  req.user = verified.decoded;
+  next();
 };
 
 // 淇濇姢API璺敱
@@ -231,6 +259,51 @@ async function compileAndPublishSnapshot() {
   const bundle = await snapshotCompiler.compile(redis, CONFIG_DIR);
   await snapshotPublisher.publish(redis, bundle.version);
   return bundle;
+}
+
+async function getSnapshotStatusSafe() {
+  try {
+    return await snapshotPublisher.getStatus(redis);
+  } catch (error) {
+    console.error('[Snapshot] failed to read snapshot status:', error.message || error);
+    return {
+      active_version: null,
+      published_at: null
+    };
+  }
+}
+
+async function restoreSnapshotStatus(previousStatus) {
+  const snapshotStatus = previousStatus || {
+    active_version: null,
+    published_at: null
+  };
+
+  try {
+    await snapshotPublisher.setStatus(redis, snapshotStatus);
+    return {
+      success: true,
+      status: snapshotStatus
+    };
+  } catch (error) {
+    console.error('[Snapshot] restore failed:', error.message || error);
+    return {
+      success: false,
+      message: error.message || 'Failed to restore snapshot status'
+    };
+  }
+}
+
+async function writeTextFileAtomic(filePath, content) {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tempPath, content, 'utf8');
+  await fs.rename(tempPath, filePath);
+}
+
+async function writeFileAtomic(filePath, content, options = undefined) {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tempPath, content, options);
+  await fs.rename(tempPath, filePath);
 }
 
 const certUpload = multer({
@@ -337,9 +410,10 @@ function buildBackendProxyConfig(backendServer, backendPortFollow) {
     throw new Error('backend_server port must be between 1 and 65535');
   }
 
-  const pathname = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '';
-  const search = parsed.search || '';
-  const uriSuffix = `${pathname}${search}`;
+  if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    throw new Error('backend_server must not include path, query, or fragment');
+  }
+
   const portFollow = normalizeBackendPortFollow(backendPortFollow);
 
   return {
@@ -347,8 +421,8 @@ function buildBackendProxyConfig(backendServer, backendPortFollow) {
     serverName: rawHostname,
     usesHttps: protocol === 'https',
     portFollow,
-    fixedProxyPass: `${protocol}://${upstreamHost}:${explicitPort}${uriSuffix}`,
-    followProxyPass: `${protocol}://${upstreamHost}:$server_port${uriSuffix}`
+    fixedProxyPass: `${protocol}://${upstreamHost}:${explicitPort}`,
+    followProxyPass: `${protocol}://${upstreamHost}:$server_port`
   };
 }
 
@@ -449,6 +523,37 @@ function normalizeAntiBypassConfig(rawConfig) {
     slider_verification_ttl: normalizeInteger(antiBypassInput.slider_verification_ttl, 300, 60, 3600),
     captcha_verification_ttl: normalizeInteger(antiBypassInput.captcha_verification_ttl, 900, 60, 7200),
     pow_verification_ttl: normalizeInteger(antiBypassInput.pow_verification_ttl, 1200, 60, 7200)
+  };
+}
+
+function normalizeHoneypotSettingsConfig(rawConfig) {
+  const honeypotInput = isObject(rawConfig && rawConfig.honeypot_settings)
+    ? rawConfig.honeypot_settings
+    : {};
+  const defaultTraps = [
+    '/.well-known/safeline-trap',
+    '/admin_access',
+    '/wp-login.php',
+    '/.git/'
+  ];
+
+  return {
+    enabled: toBooleanOrDefault(honeypotInput.enabled, true),
+    traps: Array.from(new Set(
+      (Array.isArray(honeypotInput.traps) ? honeypotInput.traps : defaultTraps)
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    ))
+  };
+}
+
+function normalizeSamplingConfig(rawConfig) {
+  const samplingInput = isObject(rawConfig && rawConfig.sampling) ? rawConfig.sampling : {};
+
+  return {
+    enabled: toBooleanOrDefault(samplingInput.enabled, true),
+    rate: normalizeFloat(samplingInput.rate, 0.01, 0, 1),
+    anomaly_threshold: normalizeFloat(samplingInput.anomaly_threshold, 5.0, 0.1, 100)
   };
 }
 
@@ -649,15 +754,36 @@ function buildAttackStatusPayload(currentState, previousState) {
   };
 }
 
-function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig) {
+function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig, globalConfig = {}) {
   const protectionInput = isObject(siteConfig && siteConfig.protection) ? siteConfig.protection : {};
-  const samplingRate = normalizeFloat(protectionInput.sampling_rate, 0.01, 0, 1);
+  const samplingConfig = normalizeSamplingConfig(globalConfig);
+  const honeypotConfig = normalizeHoneypotSettingsConfig(globalConfig);
+  const samplingRate = normalizeFloat(protectionInput.sampling_rate, samplingConfig.rate, 0, 1);
   const logSampleRate = normalizeFloat(protectionInput.log_sample_rate, samplingRate, 0, 1);
 
   return {
     ...protectionInput,
+    request_sampling_enabled: toBooleanOrDefault(
+      protectionInput.request_sampling_enabled,
+      samplingConfig.enabled
+    ),
     sampling_rate: samplingRate,
     log_sample_rate: logSampleRate,
+    anomaly_threshold: normalizeFloat(
+      protectionInput.anomaly_threshold,
+      samplingConfig.anomaly_threshold,
+      0.1,
+      100
+    ),
+    honeypot_enabled: toBooleanOrDefault(
+      protectionInput.honeypot_enabled,
+      honeypotConfig.enabled
+    ),
+    honeypot_traps: Array.from(new Set(
+      (Array.isArray(protectionInput.honeypot_traps) ? protectionInput.honeypot_traps : honeypotConfig.traps)
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    )),
     ddos_reverify_window: normalizeInteger(protectionInput.ddos_reverify_window, 120, 10, 3600),
     origin_proxy_only_enabled: toBooleanOrDefault(
       protectionInput.origin_proxy_only_enabled,
@@ -711,7 +837,12 @@ function normalizeSiteVerificationMethods(siteConfig, antiBypassConfig) {
   };
 }
 
-function normalizeSiteConfig(rawConfig, fallbackDomain, antiBypassConfig = normalizeAntiBypassConfig(rawConfig)) {
+function normalizeSiteConfig(
+  rawConfig,
+  fallbackDomain,
+  antiBypassConfig = normalizeAntiBypassConfig(rawConfig),
+  globalConfig = rawConfig
+) {
   if (!isObject(rawConfig)) {
     throw new Error('Invalid site config payload');
   }
@@ -736,7 +867,7 @@ function normalizeSiteConfig(rawConfig, fallbackDomain, antiBypassConfig = norma
   normalized.backend_port_follow = backendPortFollow;
   normalized.enabled = normalized.enabled !== false;
   normalized.tls = normalizeSiteTlsConfig(normalized, normalizedDomain);
-  normalized.protection = normalizeSiteProtectionConfig(normalized, antiBypassConfig);
+  normalized.protection = normalizeSiteProtectionConfig(normalized, antiBypassConfig, globalConfig);
   normalized.verification_methods = normalizeSiteVerificationMethods(normalized, antiBypassConfig);
 
   return normalized;
@@ -770,27 +901,118 @@ async function fileExists(filePath) {
   }
 }
 
-async function ensureNginxReadableFile(filePath) {
+async function ensureNginxReadableFile(filePath, options = {}) {
   if (!filePath) {
     return;
   }
 
   try {
     await fs.chmod(filePath, 0o644);
-  } catch (_) {
-    // Ignore chmod failures here; nginx -t will still surface a readable error.
+  } catch (error) {
+    if (options && options.strict) {
+      throw new Error(`Failed to set readable permissions on ${filePath}: ${error.message}`);
+    }
   }
 }
 
-async function copyFileForManagedCerts(sourcePath, targetPath) {
+async function snapshotFileState(filePath) {
+  try {
+    const stats = await fs.stat(filePath);
+    const content = await fs.readFile(filePath);
+    return {
+      exists: true,
+      mode: stats.mode & 0o777,
+      content
+    };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return {
+        exists: false,
+        mode: null,
+        content: null
+      };
+    }
+    throw error;
+  }
+}
+
+async function restoreFileState(filePath, snapshot) {
+  if (snapshot && snapshot.exists) {
+    await writeFileAtomic(filePath, snapshot.content);
+    if (snapshot.mode) {
+      await fs.chmod(filePath, snapshot.mode);
+    }
+    return;
+  }
+
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
+
+function createTlsTransaction() {
+  return {
+    snapshots: new Map()
+  };
+}
+
+async function rememberTlsFileSnapshot(transaction, filePath) {
+  if (!transaction || !filePath || transaction.snapshots.has(filePath)) {
+    return;
+  }
+
+  transaction.snapshots.set(filePath, await snapshotFileState(filePath));
+}
+
+async function rollbackTlsTransaction(transaction) {
+  if (!transaction || !(transaction.snapshots instanceof Map) || transaction.snapshots.size === 0) {
+    return { restored: 0 };
+  }
+
+  let restored = 0;
+  const errors = [];
+  for (const [filePath, snapshot] of Array.from(transaction.snapshots.entries()).reverse()) {
+    try {
+      await restoreFileState(filePath, snapshot);
+      restored += 1;
+    } catch (error) {
+      errors.push({ file: filePath, message: error.message || String(error) });
+    }
+  }
+
+  return {
+    restored,
+    errors
+  };
+}
+
+async function writeCertificatePairAtomic(certHostPath, certContent, keyHostPath, keyContent, options = {}) {
+  await fs.mkdir(path.dirname(certHostPath), { recursive: true });
+  await fs.mkdir(path.dirname(keyHostPath), { recursive: true });
+  await rememberTlsFileSnapshot(options.transaction, certHostPath);
+  await rememberTlsFileSnapshot(options.transaction, keyHostPath);
+  await writeFileAtomic(certHostPath, certContent, 'utf8');
+  await writeFileAtomic(keyHostPath, keyContent, 'utf8');
+  await ensureNginxReadableFile(certHostPath, { strict: true });
+  await ensureNginxReadableFile(keyHostPath, { strict: true });
+}
+
+async function copyFileForManagedCerts(sourcePath, targetPath, options = {}) {
   if (!sourcePath || !targetPath || sourcePath === targetPath) {
     return;
   }
 
-  await ensureNginxReadableFile(sourcePath);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await ensureNginxReadableFile(sourcePath, { strict: true });
+  await rememberTlsFileSnapshot(options.transaction, targetPath);
 
   try {
     await fs.copyFile(sourcePath, targetPath);
+    await ensureNginxReadableFile(targetPath, { strict: true });
     return;
   } catch (copyError) {
     // Some Docker volume drivers reject copy_file_range/clone-style copyfile calls.
@@ -801,40 +1023,85 @@ async function copyFileForManagedCerts(sourcePath, targetPath) {
   }
 
   const fileContent = await fs.readFile(sourcePath);
-  await fs.writeFile(targetPath, fileContent);
+  await writeFileAtomic(targetPath, fileContent);
+  await ensureNginxReadableFile(targetPath, { strict: true });
+}
+
+function buildTlsRollbackPayload(rollbackResult) {
+  if (!rollbackResult) {
+    return null;
+  }
+
+  const restored = Number(rollbackResult.restored || 0);
+  const errors = Array.isArray(rollbackResult.errors) ? rollbackResult.errors : [];
+
+  if (restored < 1 && errors.length < 1) {
+    return null;
+  }
+
+  return {
+    tls_restored: errors.length === 0,
+    tls_files_restored: restored,
+    tls_errors: errors
+  };
 }
 
 /** Generate a self-signed certificate for a domain using openssl. */
-function generateSelfSignedCert(domain, certHostPath, keyHostPath) {
+function generateSelfSignedCert(domain, certHostPath, keyHostPath, options = {}) {
   return new Promise((resolve, reject) => {
     const subj = `/CN=${domain}`;
     const san  = `subjectAltName=DNS:${domain}`;
+    const certTempPath = `${certHostPath}.${process.pid}.${Date.now()}.crt.tmp`;
+    const keyTempPath = `${keyHostPath}.${process.pid}.${Date.now()}.key.tmp`;
     const args = [
       'req', '-x509', '-nodes',
       '-days', '3650',
       '-newkey', 'rsa:2048',
-      '-keyout', keyHostPath,
-      '-out',    certHostPath,
+      '-keyout', keyTempPath,
+      '-out',    certTempPath,
       '-subj',   subj,
       '-addext', san,
     ];
     execFile('openssl', args, { timeout: 30000 }, (err) => {
       if (err) {
-        if (err.code === 'ENOENT') {
-          reject(new Error('OpenSSL is not installed in the admin-backend container'));
-          return;
-        }
-        reject(new Error(`Failed to generate self-signed certificate: ${err.message}`));
-      } else {
-        resolve();
+        Promise.allSettled([
+          fs.unlink(certTempPath),
+          fs.unlink(keyTempPath)
+        ]).finally(() => {
+          if (err.code === 'ENOENT') {
+            reject(new Error('OpenSSL is not installed in the admin-backend container'));
+            return;
+          }
+          reject(new Error(`Failed to generate self-signed certificate: ${err.message}`));
+        });
+        return;
       }
+
+      Promise.resolve()
+        .then(async () => {
+          await rememberTlsFileSnapshot(options.transaction, certHostPath);
+          await rememberTlsFileSnapshot(options.transaction, keyHostPath);
+          await fs.rename(certTempPath, certHostPath);
+          await fs.rename(keyTempPath, keyHostPath);
+          await ensureNginxReadableFile(certHostPath, { strict: true });
+          await ensureNginxReadableFile(keyHostPath, { strict: true });
+        })
+        .then(() => resolve())
+        .catch(async (renameError) => {
+          await Promise.allSettled([
+            fs.unlink(certTempPath),
+            fs.unlink(keyTempPath)
+          ]);
+          reject(renameError);
+        });
     });
   });
 }
 
-async function validateSiteTlsFiles(siteConfig) {
+async function validateSiteTlsFiles(siteConfig, options = {}) {
   const normalizedSiteConfig = normalizeSiteConfig(siteConfig, siteConfig && siteConfig.domain);
   const tlsConfig = normalizeSiteTlsConfig(normalizedSiteConfig, normalizedSiteConfig.domain);
+  const tlsTransaction = options.transaction || null;
 
   if (!normalizedSiteConfig.enabled) {
     return;
@@ -863,8 +1130,8 @@ async function validateSiteTlsFiles(siteConfig) {
     const currentPairExists = await fileExists(currentCertHostPath) && await fileExists(currentKeyHostPath);
     if (currentPairExists) {
       await fs.mkdir(path.dirname(desiredCertHostPath), { recursive: true });
-      await copyFileForManagedCerts(currentCertHostPath, desiredCertHostPath);
-      await copyFileForManagedCerts(currentKeyHostPath, desiredKeyHostPath);
+      await copyFileForManagedCerts(currentCertHostPath, desiredCertHostPath, { transaction: tlsTransaction });
+      await copyFileForManagedCerts(currentKeyHostPath, desiredKeyHostPath, { transaction: tlsTransaction });
     }
   }
 
@@ -888,7 +1155,8 @@ async function validateSiteTlsFiles(siteConfig) {
       await generateSelfSignedCert(
         tlsConfig.domain || normalizedSiteConfig.domain,
         desiredCertHostPath,
-        desiredKeyHostPath
+        desiredKeyHostPath,
+        { transaction: tlsTransaction }
       );
     } catch (genErr) {
       throw new Error(`TLS certificate file not found: ${managedTlsPaths.cert_path} — and self-signed generation failed: ${genErr.message}`);
@@ -897,8 +1165,12 @@ async function validateSiteTlsFiles(siteConfig) {
     throw new Error(`TLS private key file not found: ${managedTlsPaths.key_path}`);
   }
 
-  await ensureNginxReadableFile(desiredCertHostPath);
-  await ensureNginxReadableFile(desiredKeyHostPath);
+  await ensureNginxReadableFile(desiredCertHostPath, { strict: true });
+  await ensureNginxReadableFile(desiredKeyHostPath, { strict: true });
+
+  const certContent = await fs.readFile(desiredCertHostPath, 'utf8');
+  const keyContent = await fs.readFile(desiredKeyHostPath, 'utf8');
+  validateCertificateBundle(certContent, keyContent, tlsConfig.domain || normalizedSiteConfig.domain);
 }
 
 function sanitizeFilename(filename) {
@@ -1481,15 +1753,29 @@ async function applyIncomingClusterConfig(incomingConfig, localConfig) {
   try {
     await setupClusterSyncLoop();
   } catch (error) {
-    try {
-      await restoreTextFile(DEFAULT_CONFIG_PATH, previousConfigRaw);
-    } catch (rollbackError) {
-      console.error('[Cluster] rollback default_config.json failed:', rollbackError.message || rollbackError);
-    }
-    return { success: false, message: error.message || 'Failed to apply incoming config' };
+    const rollback = await rollbackDefaultConfigState(previousConfigRaw);
+    return {
+      success: false,
+      message: error.message || 'Failed to apply incoming config',
+      rollback
+    };
   }
 
-  return { success: true };
+  const reloadResult = await triggerNginxReload();
+  if (!reloadResult.success) {
+    const rollback = await rollbackDefaultConfigState(previousConfigRaw);
+    return {
+      success: false,
+      message: reloadResult.message || 'Failed to reload local runtime configuration',
+      reload: reloadResult.detail || null,
+      rollback
+    };
+  }
+
+  return {
+    success: true,
+    reload: reloadResult.detail || null
+  };
 }
 
 async function getNodeConfigVersion() {
@@ -1523,7 +1809,7 @@ async function syncConfigFromPrimary(config) {
   try {
     const requestAuth = { headers: { Authorization: `Bearer ${CLUSTER_TOKEN}` } };
 
-    const response = await axios.get(`${cluster.primary_api_url}/api/config`, {
+    const response = await axios.get(`${cluster.primary_api_url}/api/cluster/config`, {
       timeout: cluster.sync.request_timeout_ms,
       ...requestAuth
     });
@@ -1563,14 +1849,18 @@ async function setupClusterSyncLoop() {
 
   const intervalMs = Math.max(5000, cluster.sync.config_interval * 1000);
   clusterConfigSyncTimer = setInterval(async () => {
-    const latest = await readConfigFile(DEFAULT_CONFIG_PATH);
-    if (!latest) {
-      return;
-    }
+    try {
+      const latest = await readConfigFile(DEFAULT_CONFIG_PATH);
+      if (!latest) {
+        return;
+      }
 
-    const result = await syncConfigFromPrimary(latest);
-    if (result.attempted && !result.success) {
-      console.error('[cluster-sync] 浠庝富鑺傜偣鍚屾閰嶇疆澶辫触:', result.message);
+      const result = await syncConfigFromPrimary(latest);
+      if (result.attempted && !result.success) {
+        console.error('[cluster-sync] 浠庝富鑺傜偣鍚屾閰嶇疆澶辫触:', result.message);
+      }
+    } catch (error) {
+      console.error('[cluster-sync] failed to process sync loop:', error.message || error);
     }
   }, intervalMs);
 
@@ -1599,15 +1889,14 @@ async function readConfigFile(filePath) {
     if (error && error.code === 'ENOENT') {
       return null;
     }
-    console.error(`璇诲彇閰嶇疆鏂囦欢澶辫触 ${filePath}:`, error);
-    return null;
+    throw new Error(`Failed to read configuration file ${filePath}: ${error.message}`);
   }
 }
 
 // 鍐欏叆閰嶇疆鏂囦欢
 async function writeConfigFile(filePath, data) {
   try {
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+    await writeTextFileAtomic(filePath, `${JSON.stringify(data, null, 2)}\n`);
     return true;
   } catch (error) {
     console.error(`鍐欏叆閰嶇疆鏂囦欢澶辫触 ${filePath}:`, error);
@@ -1628,7 +1917,7 @@ async function readTextFileIfExists(filePath) {
 
 async function restoreTextFile(filePath, content) {
   if (typeof content === 'string') {
-    await fs.writeFile(filePath, content, 'utf8');
+    await writeTextFileAtomic(filePath, content);
     return;
   }
 
@@ -1641,9 +1930,60 @@ async function restoreTextFile(filePath, content) {
   }
 }
 
+async function removeFileIfExists(filePath) {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
+
+async function rollbackDefaultConfigState(previousConfigRaw, previousSnapshotStatus) {
+  const rollback = {
+    file_restored: false,
+    snapshot_restored: false,
+    cluster_sync_reloaded: false,
+    runtime_reload_applied: false
+  };
+
+  try {
+    await restoreTextFile(DEFAULT_CONFIG_PATH, previousConfigRaw);
+    rollback.file_restored = true;
+  } catch (error) {
+    console.error('[Rollback] failed to restore default_config.json:', error.message || error);
+  }
+
+  if (previousSnapshotStatus) {
+    const snapshotRollback = await restoreSnapshotStatus(previousSnapshotStatus);
+    rollback.snapshot_restored = snapshotRollback.success === true;
+    if (!snapshotRollback.success) {
+      rollback.snapshot_error = snapshotRollback.message;
+    }
+  }
+
+  try {
+    await setupClusterSyncLoop();
+    rollback.cluster_sync_reloaded = true;
+  } catch (error) {
+    console.error('[Rollback] failed to restart cluster sync loop:', error.message || error);
+  }
+
+  const reloadResult = await triggerNginxReload();
+  rollback.runtime_reload_applied = reloadResult.success === true;
+  rollback.reload = reloadResult.detail || null;
+  if (!reloadResult.success) {
+    rollback.reload_error = reloadResult.message;
+  }
+
+  return rollback;
+}
+
 async function updateDefaultConfigWithReload(mutateConfig) {
   const currentConfig = await readConfigFile(DEFAULT_CONFIG_PATH) || {};
   const previousConfigRaw = await readTextFileIfExists(DEFAULT_CONFIG_PATH);
+  const previousSnapshotStatus = await getSnapshotStatusSafe();
   const nextConfig = JSON.parse(JSON.stringify(currentConfig));
   const mutationResult = await mutateConfig(nextConfig, currentConfig);
 
@@ -1676,16 +2016,12 @@ async function updateDefaultConfigWithReload(mutateConfig) {
   try {
     snapshotBundle = await compileAndPublishSnapshot();
   } catch (publishError) {
-    try {
-      await restoreTextFile(DEFAULT_CONFIG_PATH, previousConfigRaw);
-    } catch (rollbackError) {
-      console.error('[Snapshot] rollback default_config.json failed:', rollbackError.message || rollbackError);
-    }
-
+    const rollback = await rollbackDefaultConfigState(previousConfigRaw, previousSnapshotStatus);
     return {
       success: false,
       status: 500,
       message: publishError.message || 'Snapshot publish failed',
+      rollback,
       replication: {
         total: 0,
         success: 0,
@@ -1710,6 +2046,21 @@ async function updateDefaultConfigWithReload(mutateConfig) {
     details: replicationDetails
   };
 
+  const reloadResult = await triggerNginxReload();
+  if (!reloadResult.success) {
+    const rollback = await rollbackDefaultConfigState(previousConfigRaw, previousSnapshotStatus);
+    return {
+      success: false,
+      status: 500,
+      message: reloadResult.message
+        ? `Failed to reload local runtime configuration (rolled back): ${reloadResult.message}`
+        : 'Failed to reload local runtime configuration (rolled back)',
+      reload: reloadResult.detail || null,
+      rollback,
+      replication
+    };
+  }
+
   return {
     success: true,
     changed: true,
@@ -1719,6 +2070,7 @@ async function updateDefaultConfigWithReload(mutateConfig) {
       version: snapshotBundle.version,
       compiled_at: snapshotBundle.compiled_at
     },
+    reload: reloadResult.detail || null,
     replication
   };
 }
@@ -2063,7 +2415,6 @@ function isUpdaterConfigured() {
     && String(
       process.env.UPDATER_SHARED_SECRET
       || process.env.UPDATER_SHARED_TOKEN
-      || JWT_SECRET
       || ''
     ).trim()
   );
@@ -2074,7 +2425,6 @@ async function callUpdaterService(method, pathname, payload) {
   const sharedSecret = String(
     process.env.UPDATER_SHARED_SECRET
     || process.env.UPDATER_SHARED_TOKEN
-    || JWT_SECRET
     || ''
   ).trim();
 
@@ -2217,7 +2567,26 @@ apiRouter.get('/config', async (req, res) => {
 
     config.cluster = normalizeClusterConfig(config);
     config.anti_bypass = normalizeAntiBypassConfig(config);
+    config.honeypot_settings = normalizeHoneypotSettingsConfig(config);
+    config.sampling = normalizeSamplingConfig(config);
     res.json({ success: true, data: config });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to fetch configuration');
+  }
+});
+
+apiRouter.get('/cluster/config', clusterAuthMiddleware, async (req, res) => {
+  try {
+    const config = await readConfigFile(DEFAULT_CONFIG_PATH);
+    if (!config) {
+      return sendError(res, 404, 'Configuration file not found');
+    }
+
+    config.cluster = normalizeClusterConfig(config);
+    config.anti_bypass = normalizeAntiBypassConfig(config);
+    config.honeypot_settings = normalizeHoneypotSettingsConfig(config);
+    config.sampling = normalizeSamplingConfig(config);
+    return res.json({ success: true, data: config });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to fetch configuration');
   }
@@ -2231,53 +2600,44 @@ apiRouter.put('/config', async (req, res) => {
       return sendError(res, 400, 'Invalid configuration payload');
     }
 
-    const mergedConfig = deepMerge(await readConfigFile(DEFAULT_CONFIG_PATH) || {}, req.body);
-    mergedConfig.cluster = normalizeClusterConfig(mergedConfig);
-    mergedConfig.anti_bypass = normalizeAntiBypassConfig(mergedConfig);
-    delete mergedConfig.traffic_notifications;
-    delete mergedConfig.traffic_packages;
-    const previousConfigRaw = await readTextFileIfExists(DEFAULT_CONFIG_PATH);
+    const result = await updateDefaultConfigWithReload((nextConfig, currentConfig) => {
+      const mergedConfig = deepMerge(currentConfig, req.body);
+      mergedConfig.cluster = normalizeClusterConfig(mergedConfig);
+      mergedConfig.anti_bypass = normalizeAntiBypassConfig(mergedConfig);
+      mergedConfig.honeypot_settings = normalizeHoneypotSettingsConfig(mergedConfig);
+      mergedConfig.sampling = normalizeSamplingConfig(mergedConfig);
+      delete mergedConfig.traffic_notifications;
+      delete mergedConfig.traffic_packages;
 
-    // 鏇存柊閰嶇疆鏂囦欢
-    const saved = await writeConfigFile(DEFAULT_CONFIG_PATH, mergedConfig);
-    if (!saved) {
-      return sendError(res, 500, 'Failed to save configuration');
+      Object.keys(nextConfig).forEach((key) => {
+        delete nextConfig[key];
+      });
+      Object.assign(nextConfig, mergedConfig);
+      return {
+        changed: true,
+        message: 'Configuration updated and published'
+      };
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 500).json({
+        success: false,
+        message: result.message,
+        reload: result.reload || null,
+        rollback: result.rollback || null
+      });
     }
-
-    await setupClusterSyncLoop();
-
-    let snapshotBundle;
-    try {
-      snapshotBundle = await compileAndPublishSnapshot();
-    } catch (publishError) {
-      await restoreTextFile(DEFAULT_CONFIG_PATH, previousConfigRaw);
-      await setupClusterSyncLoop();
-      return sendError(res, 500, publishError.message || 'Snapshot publish failed');
-    }
-
-    let replication = [];
-    try {
-      replication = await replicateConfigToSecondaries(mergedConfig);
-    } catch (replicationError) {
-      console.error('[Cluster] config replication failed:', replicationError.message || replicationError);
-      replication = [];
-    }
-
-    const replicatedOk = replication.filter((item) => item.success).length;
-    const replicatedFail = replication.length - replicatedOk;
 
     return res.json({
       success: true,
-      message: 'Configuration updated and published',
-      snapshot: {
-        version: snapshotBundle.version,
-        compiled_at: snapshotBundle.compiled_at
-      },
-      replication: {
-        total: replication.length,
-        success: replicatedOk,
-        failed: replicatedFail,
-        details: replication
+      message: result.message,
+      snapshot: result.snapshot || null,
+      reload: result.reload || null,
+      replication: result.replication || {
+        total: 0,
+        success: 0,
+        failed: 0,
+        details: []
       }
     });
   } catch (error) {
@@ -2343,11 +2703,24 @@ apiRouter.post('/certificates/upload', (req, res) => {
       const names = resolveCertFilenames(req.body || {}, domain);
       const certHostPath = path.join(CERTS_DIR, names.cert_file_name);
       const keyHostPath = path.join(CERTS_DIR, names.key_file_name);
+      const tlsTransaction = createTlsTransaction();
 
-      await fs.writeFile(certHostPath, certContent, 'utf8');
-      await fs.writeFile(keyHostPath, keyContent, 'utf8');
-      await ensureNginxReadableFile(certHostPath);
-      await ensureNginxReadableFile(keyHostPath);
+      try {
+        await writeCertificatePairAtomic(
+          certHostPath,
+          certContent,
+          keyHostPath,
+          keyContent,
+          { transaction: tlsTransaction }
+        );
+      } catch (writeError) {
+        const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
+        return res.status(500).json({
+          code: 500,
+          message: writeError.message || 'Failed to store certificate files',
+          rollback: tlsRollback || undefined
+        });
+      }
 
       res.json({
         success: true,
@@ -2376,11 +2749,24 @@ apiRouter.post('/certificates/content', async (req, res) => {
 
     const certHostPath = path.join(CERTS_DIR, names.cert_file_name);
     const keyHostPath = path.join(CERTS_DIR, names.key_file_name);
+    const tlsTransaction = createTlsTransaction();
 
-    await fs.writeFile(certHostPath, certContent, 'utf8');
-    await fs.writeFile(keyHostPath, keyContent, 'utf8');
-    await ensureNginxReadableFile(certHostPath);
-    await ensureNginxReadableFile(keyHostPath);
+    try {
+      await writeCertificatePairAtomic(
+        certHostPath,
+        certContent,
+        keyHostPath,
+        keyContent,
+        { transaction: tlsTransaction }
+      );
+    } catch (writeError) {
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
+      return res.status(500).json({
+        code: 500,
+        message: writeError.message || 'Failed to store certificate content',
+        rollback: tlsRollback || undefined
+      });
+    }
 
     res.json({
       success: true,
@@ -2415,7 +2801,7 @@ apiRouter.get('/sites/:domain', async (req, res) => {
 
     const globalConfig = await readConfigFile(DEFAULT_CONFIG_PATH) || {};
     const antiBypassConfig = normalizeAntiBypassConfig(globalConfig);
-    const normalizedSiteConfig = normalizeSiteConfig(siteConfig, normalizedDomain, antiBypassConfig);
+    const normalizedSiteConfig = normalizeSiteConfig(siteConfig, normalizedDomain, antiBypassConfig, globalConfig);
     res.json({ success: true, data: normalizedSiteConfig });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to fetch site configuration');
@@ -2443,55 +2829,100 @@ apiRouter.put('/sites/:domain', async (req, res) => {
     try {
       const globalConfig = await readConfigFile(DEFAULT_CONFIG_PATH) || {};
       const antiBypassConfig = normalizeAntiBypassConfig(globalConfig);
-      normalizedSiteConfig = normalizeSiteConfig(req.body, normalizedDomain, antiBypassConfig);
+      normalizedSiteConfig = normalizeSiteConfig(req.body, normalizedDomain, antiBypassConfig, globalConfig);
     } catch (normalizeError) {
       return sendError(res, 400, normalizeError.message);
     }
 
+    const tlsTransaction = createTlsTransaction();
     try {
-      await validateSiteTlsFiles(normalizedSiteConfig);
+      await validateSiteTlsFiles(normalizedSiteConfig, { transaction: tlsTransaction });
     } catch (tlsError) {
-      return sendError(res, 400, tlsError.message);
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
+      return res.status(400).json({
+        code: 400,
+        message: tlsError.message,
+        rollback: tlsRollback || undefined
+      });
     }
     
     // 鍐欏叆绔欑偣閰嶇疆鏂囦欢
     const sitePath = path.join(SITES_DIR, `${normalizedDomain}.json`);
     const nginxConfigPath = path.join(NGINX_CONF_DIR, `${normalizedDomain}.conf`);
+    const legacySitePath = domain !== normalizedDomain
+      ? path.join(SITES_DIR, `${domain}.json`)
+      : null;
+    const legacyNginxConfigPath = domain !== normalizedDomain
+      ? path.join(NGINX_CONF_DIR, `${domain}.conf`)
+      : null;
     const previousSiteRaw = await readTextFileIfExists(sitePath);
     const previousNginxRaw = await readTextFileIfExists(nginxConfigPath);
+    const previousLegacySiteRaw = legacySitePath
+      ? await readTextFileIfExists(legacySitePath)
+      : null;
+    const previousLegacyNginxRaw = legacyNginxConfigPath
+      ? await readTextFileIfExists(legacyNginxConfigPath)
+      : null;
+    const previousSnapshotStatus = await getSnapshotStatusSafe();
     const success = await writeConfigFile(sitePath, normalizedSiteConfig);
     
     if (!success) {
-      return sendError(res, 500, 'Failed to save site configuration');
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
+      return res.status(500).json({
+        code: 500,
+        message: 'Failed to save site configuration',
+        rollback: tlsRollback || undefined
+      });
     }
     
     // 鐢熸垚Nginx閰嶇疆
     try {
-      await generateNginxConfig(normalizedDomain, normalizedSiteConfig);
+      await generateNginxConfig(normalizedDomain, normalizedSiteConfig, { skipTlsValidation: true });
     } catch (generateError) {
       await restoreTextFile(sitePath, previousSiteRaw);
       await restoreTextFile(nginxConfigPath, previousNginxRaw);
-      return sendError(
-        res,
-        500,
-        generateError && generateError.message
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction)) || {};
+      return res.status(500).json({
+        code: 500,
+        message: generateError && generateError.message
           ? `Failed to generate Nginx configuration (rolled back): ${generateError.message}`
-          : 'Failed to generate Nginx configuration (rolled back)'
-      );
+          : 'Failed to generate Nginx configuration (rolled back)',
+        rollback: {
+          ...tlsRollback,
+          site_config_restored: true,
+          nginx_config_restored: true
+        }
+      });
     }
 
     // 清理可能存在的大小写不一致旧文件
     if (domain !== normalizedDomain) {
       try {
-        await fs.unlink(path.join(SITES_DIR, `${domain}.json`));
-      } catch (_) {
-        // ignore
-      }
-
-      try {
-        await fs.unlink(path.join(NGINX_CONF_DIR, `${domain}.conf`));
-      } catch (_) {
-        // ignore
+        await removeFileIfExists(legacySitePath);
+        await removeFileIfExists(legacyNginxConfigPath);
+      } catch (cleanupError) {
+        await restoreTextFile(sitePath, previousSiteRaw);
+        await restoreTextFile(nginxConfigPath, previousNginxRaw);
+        if (legacySitePath) {
+          await restoreTextFile(legacySitePath, previousLegacySiteRaw);
+        }
+        if (legacyNginxConfigPath) {
+          await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
+        }
+        const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction)) || {};
+        return res.status(500).json({
+          code: 500,
+          message: cleanupError && cleanupError.message
+            ? `Failed to clean up legacy site files (rolled back): ${cleanupError.message}`
+            : 'Failed to clean up legacy site files (rolled back)',
+          rollback: {
+            ...tlsRollback,
+            site_config_restored: true,
+            nginx_config_restored: true,
+            legacy_site_restored: legacySitePath ? true : undefined,
+            legacy_nginx_config_restored: legacyNginxConfigPath ? true : undefined
+          }
+        });
       }
     }
     
@@ -2501,19 +2932,54 @@ apiRouter.put('/sites/:domain', async (req, res) => {
     } catch (publishError) {
       await restoreTextFile(sitePath, previousSiteRaw);
       await restoreTextFile(nginxConfigPath, previousNginxRaw);
-      return sendError(res, 500, publishError.message || 'Snapshot publish failed');
+      if (legacySitePath) {
+        await restoreTextFile(legacySitePath, previousLegacySiteRaw);
+      }
+      if (legacyNginxConfigPath) {
+        await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
+      }
+      const snapshotRollback = await restoreSnapshotStatus(previousSnapshotStatus);
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction)) || {};
+      return res.status(500).json({
+        code: 500,
+        message: publishError.message || 'Snapshot publish failed',
+        rollback: {
+          ...tlsRollback,
+          site_config_restored: true,
+          nginx_config_restored: true,
+          legacy_site_restored: legacySitePath ? true : undefined,
+          legacy_nginx_config_restored: legacyNginxConfigPath ? true : undefined,
+          snapshot_restored: snapshotRollback.success === true
+        }
+      });
     }
 
     const reloadResult = await triggerNginxReload();
     if (!reloadResult.success) {
       await restoreTextFile(sitePath, previousSiteRaw);
       await restoreTextFile(nginxConfigPath, previousNginxRaw);
+      if (legacySitePath) {
+        await restoreTextFile(legacySitePath, previousLegacySiteRaw);
+      }
+      if (legacyNginxConfigPath) {
+        await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
+      }
+      const snapshotRollback = await restoreSnapshotStatus(previousSnapshotStatus);
+      const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction)) || {};
       return res.status(500).json({
         code: 500,
         message: reloadResult.message
           ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
           : 'Failed to reload Nginx configuration (rolled back)',
-        reload: reloadResult.detail || null
+        reload: reloadResult.detail || null,
+        rollback: {
+          ...tlsRollback,
+          site_config_restored: true,
+          nginx_config_restored: true,
+          legacy_site_restored: legacySitePath ? true : undefined,
+          legacy_nginx_config_restored: legacyNginxConfigPath ? true : undefined,
+          snapshot_restored: snapshotRollback.success === true
+        }
       });
     }
 
@@ -2560,23 +3026,35 @@ apiRouter.delete('/sites/:domain', async (req, res) => {
     const previousLegacyNginxRaw = legacyNginxConfigPath
       ? await readTextFileIfExists(legacyNginxConfigPath)
       : null;
+    const previousSnapshotStatus = await getSnapshotStatusSafe();
     
-    // 鍒犻櫎绔欑偣閰嶇疆鏂囦欢
-    await fs.unlink(sitePath);
-    
-    // 鍒犻櫎Nginx閰嶇疆
     try {
-      await fs.unlink(nginxConfigPath);
-    } catch (error) {
-      console.error(`鍒犻櫎Nginx閰嶇疆澶辫触 ${nginxConfigPath}:`, error);
-    }
+      // 鍒犻櫎绔欑偣閰嶇疆鏂囦欢
+      await fs.unlink(sitePath);
+      
+      // 鍒犻櫎Nginx閰嶇疆
+      await removeFileIfExists(nginxConfigPath);
 
-    if (legacyNginxConfigPath) {
-      try {
-        await fs.unlink(legacyNginxConfigPath);
-      } catch (_) {
-        // ignore
+      if (legacyNginxConfigPath) {
+        await removeFileIfExists(legacyNginxConfigPath);
       }
+    } catch (deleteError) {
+      await restoreTextFile(sitePath, previousSiteRaw);
+      await restoreTextFile(nginxConfigPath, previousNginxRaw);
+      if (legacyNginxConfigPath) {
+        await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
+      }
+      return res.status(500).json({
+        code: 500,
+        message: deleteError && deleteError.message
+          ? `Failed to delete site files (rolled back): ${deleteError.message}`
+          : 'Failed to delete site files (rolled back)',
+        rollback: {
+          site_config_restored: true,
+          nginx_config_restored: true,
+          legacy_nginx_config_restored: legacyNginxConfigPath ? true : undefined
+        }
+      });
     }
     
     let snapshotBundle;
@@ -2588,6 +3066,7 @@ apiRouter.delete('/sites/:domain', async (req, res) => {
       if (legacyNginxConfigPath) {
         await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
       }
+      await restoreSnapshotStatus(previousSnapshotStatus);
       return sendError(res, 500, publishError.message || 'Snapshot publish failed');
     }
 
@@ -2598,12 +3077,16 @@ apiRouter.delete('/sites/:domain', async (req, res) => {
       if (legacyNginxConfigPath) {
         await restoreTextFile(legacyNginxConfigPath, previousLegacyNginxRaw);
       }
+      const rollback = await restoreSnapshotStatus(previousSnapshotStatus);
       return res.status(500).json({
         code: 500,
         message: reloadResult.message
           ? `Failed to reload Nginx configuration (rolled back): ${reloadResult.message}`
           : 'Failed to reload Nginx configuration (rolled back)',
-        reload: reloadResult.detail || null
+        reload: reloadResult.detail || null,
+        rollback: {
+          snapshot_restored: rollback.success === true
+        }
       });
     }
 
@@ -3313,7 +3796,7 @@ apiRouter.post('/cluster/sync', async (req, res) => {
 });
 
 // 璺敱: 浠庝富鑺傜偣鎺ユ敹閰嶇疆鍚屾
-apiRouter.post('/cluster/sync/config', async (req, res) => {
+apiRouter.post('/cluster/sync/config', clusterAuthMiddleware, async (req, res) => {
   try {
     const payload = req.body;
     if (!payload || !isObject(payload.config)) {
@@ -3364,7 +3847,7 @@ apiRouter.post('/cluster/sync/config', async (req, res) => {
 });
 
 // 路由: 从主节点接收黑名单同步
-apiRouter.post('/cluster/sync/blacklist', async (req, res) => {
+apiRouter.post('/cluster/sync/blacklist', clusterAuthMiddleware, async (req, res) => {
   try {
     const { action, duration, source } = req.body || {};
     const ip = normalizeIpAddress(req.body && req.body.ip);
@@ -3404,6 +3887,16 @@ apiRouter.post('/cluster/sync/blacklist', async (req, res) => {
       }
     } else {
       await redis.del(key);
+    }
+
+    try {
+      await redis.publish('cluster:blacklist:sync', JSON.stringify({
+        action,
+        ip,
+        duration
+      }));
+    } catch (publishError) {
+      console.error('[Cluster] failed to publish blacklist sync event:', publishError.message || publishError);
     }
 
     res.json({ success: true, message: 'Blacklist sync successful' });
@@ -3514,10 +4007,14 @@ apiRouter.get('/runtime/profile', async (req, res) => {
 
 async function triggerNginxReload() {
   const url = process.env.NGINX_RELOAD_URL || 'http://nginx:80/_reload';
+  const reloadToken = String(process.env.NGINX_RELOAD_TOKEN || JWT_SECRET || '').trim();
 
   try {
     const response = await axios.get(url, {
       timeout: 15000,
+      headers: reloadToken
+        ? { 'X-Reload-Token': reloadToken }
+        : undefined,
       validateStatus: () => true
     });
 
@@ -3564,7 +4061,7 @@ async function triggerNginxReload() {
 }
 
 // 鐢熸垚Nginx閰嶇疆鏂囦欢
-async function generateNginxConfig(domain, siteConfig) {
+async function generateNginxConfig(domain, siteConfig, options = {}) {
   const isValidDomain = /^[a-zA-Z0-9.-]{1,255}$/.test(domain);
   if (!isValidDomain) {
     throw new Error('Invalid domain format');
@@ -3573,15 +4070,13 @@ async function generateNginxConfig(domain, siteConfig) {
   const normalizedSiteConfig = normalizeSiteConfig(siteConfig, domain);
   const configPath = path.join(NGINX_CONF_DIR, `${domain}.conf`);
 
-  await validateSiteTlsFiles(normalizedSiteConfig);
+  if (!options.skipTlsValidation) {
+    await validateSiteTlsFiles(normalizedSiteConfig, { transaction: options.tlsTransaction || null });
+  }
 
   if (!normalizedSiteConfig.enabled) {
     // 禁用站点时删除对应 Nginx 配置，避免残留生效
-    try {
-      await fs.unlink(configPath);
-    } catch (_) {
-      // ignore
-    }
+    await removeFileIfExists(configPath);
     return;
   }
 
@@ -3738,7 +4233,7 @@ ${sharedDirectives}
     configTemplate = `${httpBlock}\n${httpsBlock}`;
   }
 
-  await fs.writeFile(configPath, configTemplate, 'utf8');
+  await writeTextFileAtomic(configPath, `${configTemplate.trimStart()}\n`);
 }
 
 // ── ML Management Routes ──────────────────────────────────────────────────

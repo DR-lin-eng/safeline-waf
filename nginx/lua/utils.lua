@@ -624,7 +624,27 @@ function _M.calculate_request_fingerprint(headers, args, method, uri)
 end
 
 -- 检测蜜罐触发
-function _M.check_honeypot_trap(uri, args, headers)
+function _M.check_honeypot_trap(uri, args, headers, traps)
+    uri = type(uri) == "string" and uri or ""
+    headers = type(headers) == "table" and headers or {}
+
+    if type(traps) == "table" then
+        for _, trap in ipairs(traps) do
+            if type(trap) == "string" then
+                local normalized_trap = trap:match("^%s*(.-)%s*$")
+                if normalized_trap ~= "" then
+                    if normalized_trap:sub(-1) == "/" then
+                        if uri:sub(1, #normalized_trap) == normalized_trap then
+                            return true, "configured_resource"
+                        end
+                    elseif uri == normalized_trap then
+                        return true, "configured_resource"
+                    end
+                end
+            end
+        end
+    end
+
     -- 检查是否访问了隐藏的蜜罐链接
     if uri:match("%.well%-known/safeline%-trap") or
        uri:match("/admin_access[%.%w]*$") or

@@ -295,6 +295,29 @@ export default {
         uploading: false,
         message: '',
         error: ''
+      },
+      globalDefaults: {
+        anti_bypass: {
+          origin_proxy_only_default: false,
+          slider_step_up_on_high_risk: true,
+          slider_verification_ttl: 300,
+          captcha_verification_ttl: 900,
+          pow_verification_ttl: 1200
+        },
+        honeypot_settings: {
+          enabled: true,
+          traps: [
+            '/.well-known/safeline-trap',
+            '/admin_access',
+            '/wp-login.php',
+            '/.git/'
+          ]
+        },
+        sampling: {
+          enabled: true,
+          rate: 0.01,
+          anomaly_threshold: 5.0
+        }
       }
     };
   },
@@ -305,6 +328,7 @@ export default {
   },
   created() {
     this.fetchSites();
+    this.fetchGlobalDefaults();
   },
   methods: {
     validateDomainInput(value) {
@@ -335,6 +359,10 @@ export default {
 
       if (parsed.username || parsed.password) {
         return { valid: false, normalized: '', message: '后端服务器 URL 中不能包含用户名或密码。' };
+      }
+
+      if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+        return { valid: false, normalized: '', message: '后端服务器只能填写协议、主机和端口，不能包含路径、查询参数或片段。' };
       }
 
       if (parsed.port) {
@@ -398,6 +426,37 @@ export default {
         rateLimit: false,
         verification: false
       };
+    },
+    async fetchGlobalDefaults() {
+      try {
+        const response = await axios.get('/config');
+        if (response.data && response.data.success) {
+          const rootConfig = response.data.data || {};
+          const antiBypass = response.data.data && response.data.data.anti_bypass
+            ? response.data.data.anti_bypass
+            : {};
+          const honeypotSettings = rootConfig.honeypot_settings && typeof rootConfig.honeypot_settings === 'object'
+            ? rootConfig.honeypot_settings
+            : {};
+          const sampling = rootConfig.sampling && typeof rootConfig.sampling === 'object'
+            ? rootConfig.sampling
+            : {};
+          this.globalDefaults.anti_bypass = {
+            ...this.globalDefaults.anti_bypass,
+            ...antiBypass
+          };
+          this.globalDefaults.honeypot_settings = {
+            ...this.globalDefaults.honeypot_settings,
+            ...honeypotSettings
+          };
+          this.globalDefaults.sampling = {
+            ...this.globalDefaults.sampling,
+            ...sampling
+          };
+        }
+      } catch (_error) {
+        // Keep frontend defaults when global config is temporarily unavailable.
+      }
     },
     onCertFileChange(type, event) {
       if (type !== 'cert' && type !== 'key') {
@@ -514,6 +573,11 @@ export default {
       }
     },
     getEmptySite() {
+      const antiBypassDefaults = (this.globalDefaults && this.globalDefaults.anti_bypass) || {};
+      const honeypotDefaults = (this.globalDefaults && this.globalDefaults.honeypot_settings) || {};
+      const samplingDefaults = (this.globalDefaults && this.globalDefaults.sampling) || {};
+      const defaultSamplingRate = Number(samplingDefaults.rate);
+      const defaultAnomalyThreshold = Number(samplingDefaults.anomaly_threshold);
       return {
         domain: '',
         backend_server: 'http://localhost:8080',
@@ -532,20 +596,20 @@ export default {
           anti_cc_enabled: true,
           automation_detection_enabled: true,
           traffic_analysis_enabled: true,
-          request_sampling_enabled: true,
-          sampling_rate: 0.01,
-          log_sample_rate: 0.01,
-          anomaly_threshold: 5.0,
+          request_sampling_enabled: samplingDefaults.enabled !== false,
+          sampling_rate: Number.isFinite(defaultSamplingRate) ? defaultSamplingRate : 0.01,
+          log_sample_rate: Number.isFinite(defaultSamplingRate) ? defaultSamplingRate : 0.01,
+          anomaly_threshold: Number.isFinite(defaultAnomalyThreshold) ? defaultAnomalyThreshold : 5.0,
           js_encryption_enabled: false,
           prevent_browser_f12: false,
-          honeypot_enabled: true,
+          honeypot_enabled: honeypotDefaults.enabled !== false,
           auto_blacklist_enabled: true,
           request_logging_enabled: true,
           request_content_inspection_enabled: true,
           request_body_max_bytes: 32768,
           request_field_max_len: 4096,
           ddos_reverify_window: 120,
-          origin_proxy_only_enabled: false
+          origin_proxy_only_enabled: antiBypassDefaults.origin_proxy_only_default === true
         },
         verification_methods: {
           captcha_enabled: true,
@@ -553,10 +617,10 @@ export default {
           pow_enabled: true,
           pow_base_difficulty: 4,
           pow_max_difficulty: 8,
-          slider_step_up_on_high_risk: true,
-          slider_verification_ttl: 300,
-          captcha_verification_ttl: 900,
-          pow_verification_ttl: 1200,
+          slider_step_up_on_high_risk: antiBypassDefaults.slider_step_up_on_high_risk !== false,
+          slider_verification_ttl: Number(antiBypassDefaults.slider_verification_ttl || 300),
+          captcha_verification_ttl: Number(antiBypassDefaults.captcha_verification_ttl || 900),
+          pow_verification_ttl: Number(antiBypassDefaults.pow_verification_ttl || 1200),
           verification_methods: {
             ip_address: true,
             user_agent: true,
@@ -588,7 +652,8 @@ export default {
         ? '端口跟随入口端口（只切换 80/443，不切换 http/https）'
         : '固定使用回源地址中的端口';
     },
-    openAddSiteModal() {
+    async openAddSiteModal() {
+      await this.fetchGlobalDefaults();
       this.isEditMode = false;
       this.createStep = 'basic';
       this.currentSite = this.getEmptySite();
