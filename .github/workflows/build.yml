@@ -32,6 +32,8 @@ jobs:
             context: ./admin/backend
           - name: safeline-admin-frontend
             context: ./admin/frontend
+          - name: safeline-admin-updater
+            context: ./admin/updater
 
     steps:
       - name: Checkout
@@ -96,3 +98,4 @@ jobs:
           echo "| safeline-nginx | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| safeline-admin-backend | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| safeline-admin-frontend | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| safeline-admin-updater | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY

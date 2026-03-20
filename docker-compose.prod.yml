@@ -83,6 +83,8 @@ services:
       - NGINX_RELOAD_URL=http://nginx:80/_reload
       - NGINX_METRICS_URL=http://nginx:80/_metrics
       - NGINX_CONF_DIR=/nginx/conf.d
+      - UPDATER_URL=http://admin-updater:3100
+      - UPDATER_SHARED_SECRET=${UPDATER_SHARED_SECRET:-}
       - JWT_SECRET
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD_HASH
@@ -102,6 +104,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  admin-updater:
+    image: ghcr.io/dr-lin-eng/safeline-admin-updater:${SAFELINE_TAG:-main}
+    container_name: safeline-waf-admin-updater
+    expose:
+      - "3100"
+    volumes:
+      - .:${UPDATER_WORKSPACE_DIR:-/opt/safeline-waf}:ro
+      - ./data/updater:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PORT=3100
+      - JWT_SECRET
+      - SAFELINE_TAG=${SAFELINE_TAG:-main}
+      - UPDATER_SHARED_SECRET=${UPDATER_SHARED_SECRET:-}
+      - UPDATER_WORKDIR=${UPDATER_WORKSPACE_DIR:-/opt/safeline-waf}
+      - UPDATER_STATE_DIR=/data
+      - UPDATER_RUNNER_STATE_DIR=${UPDATER_WORKSPACE_DIR:-/opt/safeline-waf}/data/updater
+      - UPDATER_COMPOSE_FILE=docker-compose.prod.yml
+      - UPDATER_FALLBACK_COMPOSE_FILE=docker-compose.yml
+      - UPDATER_PULL_SOURCE=${UPDATER_PULL_SOURCE:-true}
+      - UPDATER_GIT_REMOTE=${UPDATER_GIT_REMOTE:-origin}
+      - UPDATER_GIT_BRANCH=${UPDATER_GIT_BRANCH:-main}
+      - UPDATER_SERVICES=nginx,redis,admin-backend,admin-frontend,admin-updater
+      - UPDATER_RUNNER_IMAGE=ghcr.io/dr-lin-eng/safeline-admin-updater:${SAFELINE_TAG:-main}
+    restart: always
+    networks:
+      - safeline-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3100/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   admin-frontend:
     image: ghcr.io/dr-lin-eng/safeline-admin-frontend:${SAFELINE_TAG:-main}

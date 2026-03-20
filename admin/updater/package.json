@@ -1,0 +1,17 @@
+{
+  "name": "safeline-waf-admin-updater",
+  "version": "1.0.0",
+  "description": "SafeLine WAF online updater service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "runner": "node runner.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}

@@ -2,3 +2,6 @@
 .codex-tmp/
 admin/frontend/dist/
 admin/frontend/node_modules/
+data/updater/*
+!data/updater/.gitkeep
+config/update/

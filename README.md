@@ -197,6 +197,13 @@ docker-compose up -d
 - 若为首次安装或覆盖安装的非交互场景，可通过 `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH`，或 `ADMIN_USERNAME` + `ADMIN_PASSWORD` 预置凭据。
 - 若首次安装或覆盖安装的非交互场景未提供管理员凭据，安装脚本会生成一次性临时密码，并仅在安装完成时显示一次；首次登录后请立即修改。
 
+### 在线更新
+
+1. 使用安装脚本部署时，`.env` 会自动生成在线更新所需的 `UPDATER_SHARED_TOKEN` 和 `UPDATER_WORKSPACE_DIR`。
+2. 管理面板的“系统设置”页面提供“在线更新”卡片，可查看当前 Git 分支、提交、镜像通道、最近更新日志，并触发一键更新。
+3. 在线更新会执行 `git pull --ff-only`，然后由独立 runner 容器执行 `docker compose pull/up -d --remove-orphans`，因此更新器本身也可以被安全重建。
+4. 该功能默认面向 Linux 服务器部署，要求项目以稳定绝对路径运行，默认路径为 `/opt/safeline-waf`。
+
 ## 配置指南
 
 ### 通过管理界面配置

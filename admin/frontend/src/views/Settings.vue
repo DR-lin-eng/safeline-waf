@@ -46,6 +46,84 @@
       </div>
     </div>
 
+    <div class="row mb-4">
+      <div class="col-md-12">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="card-title mb-0">在线更新</h5>
+            <div class="btn-toolbar">
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-secondary"
+                @click="fetchUpdateStatus"
+                :disabled="updateLoading"
+              >
+                <i class="bi bi-arrow-clockwise mr-1"></i> 刷新
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-warning ml-2"
+                @click="runOnlineUpdate"
+                :disabled="updateLoading || updateTriggering || updateRunning || !updateStatus.available"
+              >
+                <i class="bi bi-cloud-arrow-down mr-1"></i> 执行在线更新
+              </button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div :class="['alert', getUpdateAlertClass(updateStatus.status), 'mb-3']" role="alert">
+              <div class="font-weight-bold">状态: {{ formatUpdateState(updateStatus.status) }}</div>
+              <div class="mt-1">{{ updateStatus.message || '在线更新服务已就绪。' }}</div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group col-md-3">
+                <label class="mb-1">更新模式</label>
+                <div><code>{{ (updateStatus.runtime && updateStatus.runtime.mode) || '-' }}</code></div>
+              </div>
+              <div class="form-group col-md-3">
+                <label class="mb-1">镜像通道</label>
+                <div><code>{{ (updateStatus.runtime && updateStatus.runtime.image_tag) || '-' }}</code></div>
+              </div>
+              <div class="form-group col-md-6">
+                <label class="mb-1">Compose 文件</label>
+                <div><code>{{ (updateStatus.runtime && updateStatus.runtime.compose_file) || '-' }}</code></div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group col-md-3">
+                <label class="mb-1">Git 分支</label>
+                <div><code>{{ (updateStatus.runtime && updateStatus.runtime.git && updateStatus.runtime.git.branch) || '-' }}</code></div>
+              </div>
+              <div class="form-group col-md-3">
+                <label class="mb-1">Git 提交</label>
+                <div><code>{{ (updateStatus.runtime && updateStatus.runtime.git && updateStatus.runtime.git.commit_short) || '-' }}</code></div>
+              </div>
+              <div class="form-group col-md-3">
+                <label class="mb-1">最近启动</label>
+                <div>{{ formatPublishedAt(updateStatus.last_started_at || updateStatus.started_at) }}</div>
+              </div>
+              <div class="form-group col-md-3">
+                <label class="mb-1">最近完成</label>
+                <div>{{ formatPublishedAt(updateStatus.last_finished_at || updateStatus.finished_at) }}</div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="mb-1">更新服务</label>
+              <div><code>{{ formatUpdateServices(updateStatus.runtime && updateStatus.runtime.services) }}</code></div>
+            </div>
+
+            <div v-if="updateStatus.log_tail" class="form-group mb-0">
+              <label class="mb-1">最近更新日志</label>
+              <pre class="update-log mb-0">{{ updateStatus.log_tail }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="loading" class="text-center py-5">
       <div class="spinner-border text-primary" role="status">
         <span class="sr-only">加载中...</span>
@@ -626,9 +704,34 @@ export default {
       loading: true,
       snapshotLoading: false,
       snapshotPublishing: false,
+      updateLoading: false,
+      updateRunning: false,
+      updateTriggering: false,
+      updatePollTimer: null,
       snapshotStatus: {
         active_version: null,
         published_at: null
+      },
+      updateStatus: {
+        available: false,
+        status: 'unavailable',
+        running: false,
+        message: '在线更新服务尚未部署。',
+        started_at: null,
+        finished_at: null,
+        last_started_at: null,
+        last_finished_at: null,
+        runtime: {
+          mode: null,
+          image_tag: null,
+          compose_file: null,
+          services: [],
+          git: {
+            branch: null,
+            commit_short: null
+          }
+        },
+        log_tail: ''
       },
       trustedBotsText: DEFAULT_TRUSTED_BOTS.join('\n'),
       config: {
@@ -728,6 +831,10 @@ export default {
   created() {
     this.fetchSettings();
     this.fetchSnapshotStatus();
+    this.fetchUpdateStatus();
+  },
+  beforeDestroy() {
+    this.stopUpdatePolling();
   },
   methods: {
     async fetchSettings() {
@@ -772,6 +879,135 @@ export default {
         }
       } finally {
         this.snapshotLoading = false;
+      }
+    },
+    normalizeUpdateStatus(payload) {
+      const runtime = payload && payload.runtime ? payload.runtime : {};
+      const git = runtime && runtime.git ? runtime.git : {};
+      const repo = payload && payload.repo ? payload.repo : {};
+      const normalizedStatus = (() => {
+        const raw = payload && payload.status ? String(payload.status) : 'unavailable';
+        if (raw === 'succeeded') {
+          return 'success';
+        }
+        if (raw === 'queued') {
+          return 'running';
+        }
+        return raw;
+      })();
+
+      return {
+        available: payload && (payload.available === true || payload.enabled === true),
+        status: normalizedStatus,
+        running: Boolean(payload && payload.running),
+        message: (payload && payload.message) || '',
+        started_at: payload && payload.started_at ? payload.started_at : null,
+        finished_at: payload && payload.finished_at ? payload.finished_at : null,
+        last_started_at: payload && payload.last_started_at ? payload.last_started_at : null,
+        last_finished_at: payload && payload.last_finished_at ? payload.last_finished_at : null,
+        runtime: {
+          mode: runtime && runtime.mode ? runtime.mode : (payload && payload.pull_source ? 'prod' : null),
+          image_tag: runtime && runtime.image_tag ? runtime.image_tag : null,
+          compose_file: runtime && runtime.compose_file ? runtime.compose_file : (payload && payload.compose_file ? payload.compose_file : null),
+          services: Array.isArray(runtime && runtime.services) ? runtime.services : [],
+          git: {
+            branch: git && git.branch ? git.branch : (repo && repo.branch ? repo.branch : null),
+            commit_short: git && git.commit_short ? git.commit_short : (repo && repo.short_commit ? repo.short_commit : null)
+          }
+        },
+        log_tail: payload && payload.log_tail ? payload.log_tail : ''
+      };
+    },
+    formatUpdateState(value) {
+      const labelMap = {
+        idle: '空闲',
+        queued: '已排队',
+        running: '更新中',
+        success: '最近一次更新成功',
+        succeeded: '最近一次更新成功',
+        failed: '最近一次更新失败',
+        unavailable: '未启用'
+      };
+      return labelMap[value] || '未知状态';
+    },
+    getUpdateAlertClass(value) {
+      const classMap = {
+        idle: 'alert-light',
+        queued: 'alert-warning',
+        running: 'alert-warning',
+        success: 'alert-success',
+        succeeded: 'alert-success',
+        failed: 'alert-danger',
+        unavailable: 'alert-secondary'
+      };
+      return classMap[value] || 'alert-secondary';
+    },
+    formatUpdateServices(services) {
+      return Array.isArray(services) && services.length ? services.join(', ') : '-';
+    },
+    startUpdatePolling() {
+      if (this.updatePollTimer) {
+        return;
+      }
+      this.updatePollTimer = window.setInterval(() => {
+        this.fetchUpdateStatus(true);
+      }, 5000);
+    },
+    stopUpdatePolling() {
+      if (this.updatePollTimer) {
+        window.clearInterval(this.updatePollTimer);
+        this.updatePollTimer = null;
+      }
+    },
+    async fetchUpdateStatus(silent = false) {
+      this.updateLoading = true;
+      try {
+        const response = await axios.get('/system/update/status');
+        const payload = response && response.data ? response.data : null;
+        if (payload && payload.code === 0) {
+          this.updateStatus = this.normalizeUpdateStatus(payload.data || {});
+          this.updateRunning = this.updateStatus.running;
+          if (this.updateStatus.running) {
+            this.startUpdatePolling();
+          } else {
+            this.stopUpdatePolling();
+          }
+        } else if (!silent) {
+          this.$toast.error((payload && payload.message) || '获取在线更新状态失败。');
+        }
+      } catch (error) {
+        if (!silent && shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取在线更新状态失败，请稍后重试。'));
+        }
+      } finally {
+        this.updateLoading = false;
+      }
+    },
+    async runOnlineUpdate() {
+      if (!window.confirm('即将拉取最新代码/镜像并重建核心服务。更新过程中管理面板可能会短暂重连，是否继续？')) {
+        return;
+      }
+
+      this.updateTriggering = true;
+      try {
+        const response = await axios.post('/system/update/run');
+        const payload = response && response.data ? response.data : null;
+        if (payload && payload.code === 0) {
+          this.$toast.success(payload.message || '在线更新任务已启动。');
+          this.updateStatus = this.normalizeUpdateStatus(payload.data || {});
+          this.updateRunning = this.updateStatus.running;
+          if (this.updateStatus.running) {
+            this.startUpdatePolling();
+          }
+        } else {
+          this.$toast.error((payload && payload.message) || '启动在线更新失败。');
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '启动在线更新失败，请稍后重试。'));
+        }
+      } finally {
+        this.updateTriggering = false;
       }
     },
     async publishSnapshot() {
@@ -868,5 +1104,14 @@ export default {
 }
 .card-header {
   background-color: rgba(0, 0, 0, 0.03);
+}
+.update-log {
+  max-height: 18rem;
+  overflow: auto;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: #111827;
+  color: #e5e7eb;
+  font-size: 0.875rem;
 }
 </style>

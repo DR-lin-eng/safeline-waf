@@ -2057,6 +2057,132 @@ async function fetchNginxInternalMetrics() {
   }
 }
 
+function isUpdaterConfigured() {
+  return Boolean(
+    String(process.env.UPDATER_URL || 'http://admin-updater:3100').trim()
+    && String(
+      process.env.UPDATER_SHARED_SECRET
+      || process.env.UPDATER_SHARED_TOKEN
+      || JWT_SECRET
+      || ''
+    ).trim()
+  );
+}
+
+async function callUpdaterService(method, pathname, payload) {
+  const baseUrl = String(process.env.UPDATER_URL || 'http://admin-updater:3100').trim();
+  const sharedSecret = String(
+    process.env.UPDATER_SHARED_SECRET
+    || process.env.UPDATER_SHARED_TOKEN
+    || JWT_SECRET
+    || ''
+  ).trim();
+
+  if (!baseUrl || !sharedSecret) {
+    return {
+      success: false,
+      status: 503,
+      message: 'Online updater is not configured'
+    };
+  }
+
+  const url = `${baseUrl.replace(/\/$/, '')}${pathname}`;
+
+  try {
+    const response = await axios({
+      method,
+      url,
+      data: payload,
+      timeout: method.toLowerCase() === 'post' ? 15000 : 8000,
+      headers: {
+        'x-updater-secret': sharedSecret,
+        'x-updater-token': sharedSecret
+      },
+      validateStatus: () => true
+    });
+
+    const body = isObject(response.data) ? response.data : {};
+    if (response.status >= 200 && response.status < 300 && body.success !== false) {
+      return {
+        success: true,
+        status: response.status,
+        message: typeof body.message === 'string' ? body.message : '',
+        data: body.data !== undefined ? body.data : null
+      };
+    }
+
+    return {
+      success: false,
+      status: response.status || 502,
+      message: typeof body.message === 'string' && body.message.trim()
+        ? body.message.trim()
+        : `Updater returned HTTP ${response.status}`,
+      detail: body.data !== undefined ? body.data : body
+    };
+  } catch (error) {
+    return {
+      success: false,
+      status: 502,
+      message: error.message || 'Failed to reach online updater'
+    };
+  }
+}
+
+apiRouter.get('/system/update/status', async (_req, res) => {
+  try {
+    if (!isUpdaterConfigured()) {
+      return res.json({
+        code: 0,
+        data: {
+          available: false,
+          status: 'unavailable',
+          running: false,
+          message: 'Online updater is not configured'
+        }
+      });
+    }
+
+    const result = await callUpdaterService('get', '/status');
+    if (!result.success) {
+      return sendError(res, result.status || 502, result.message || 'Failed to fetch online update status');
+    }
+
+    return res.json({
+      code: 0,
+      data: {
+        available: result.data && typeof result.data.available === 'boolean'
+          ? result.data.available
+          : true,
+        ...(isObject(result.data) ? result.data : {})
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to fetch online update status');
+  }
+});
+
+apiRouter.post('/system/update/run', async (req, res) => {
+  try {
+    if (!isUpdaterConfigured()) {
+      return sendError(res, 503, 'Online updater is not configured');
+    }
+
+    const result = await callUpdaterService('post', '/run', req.body);
+    if (!result.success) {
+      const status = result.status === 409 ? 409 : (result.status || 502);
+      return sendError(res, status, result.message || 'Failed to start online update');
+    }
+
+    return res.json({
+      code: 0,
+      message: result.message || 'Online update started',
+      data: isObject(result.data) ? result.data : {}
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to start online update');
+  }
+});
+
 apiRouter.post('/snapshot/publish', async (req, res) => {
   try {
     const bundle = await compileAndPublishSnapshot();

@@ -315,6 +315,7 @@ prepare_config() {
     local backend_writable_paths=(
         /opt/safeline-waf/config
         /opt/safeline-waf/nginx/conf.d
+        /opt/safeline-waf/data/updater
     )
 
     info "准备配置文件..."
@@ -324,6 +325,7 @@ prepare_config() {
     mkdir -p /opt/safeline-waf/config/certs
     mkdir -p /opt/safeline-waf/nginx/conf.d
     mkdir -p /opt/safeline-waf/logs
+    mkdir -p /opt/safeline-waf/data/updater
 
     # 检查默认配置文件是否存在
     if [ ! -f "/opt/safeline-waf/config/default_config.json" ]; then
@@ -399,6 +401,7 @@ prepare_env() {
     local admin_password_hash=''
     local admin_password=''
     local admin_password_confirm=''
+    local updater_shared_token=''
     local is_interactive=0
     local env_has_required_fields=0
 
@@ -429,22 +432,37 @@ prepare_env() {
     if [ "$ENV_ACTION" = "preserve" ]; then
         if [ "$ENV_EXISTED_BEFORE" -eq 1 ] && [ "$env_has_required_fields" -eq 1 ]; then
             info "升级模式：保留现有 .env、JWT_SECRET、REDIS_PASSWORD 和管理员凭据"
-            # 迁移：若旧 .env 的 ADMIN_PASSWORD_HASH 未对 $ 做 $$ 转义，自动修复
-            local _mig_jwt _mig_redis _mig_user _mig_hash _mig_escaped
+            # 迁移：若旧 .env 的 ADMIN_PASSWORD_HASH 未对 $ 做 $$ 转义，或缺少新字段，则自动修复/补齐
+            local _mig_jwt _mig_redis _mig_user _mig_hash _mig_escaped _mig_token _needs_rewrite
             _mig_jwt=$(grep '^JWT_SECRET='          "$env_file" | cut -d= -f2-)
             _mig_redis=$(grep '^REDIS_PASSWORD='    "$env_file" | cut -d= -f2-)
             _mig_user=$(grep '^ADMIN_USERNAME='     "$env_file" | cut -d= -f2-)
             _mig_hash=$(grep '^ADMIN_PASSWORD_HASH=' "$env_file" | cut -d= -f2-)
+            _mig_token=$(grep '^UPDATER_SHARED_TOKEN=' "$env_file" | cut -d= -f2-)
             _mig_escaped=$(printf '%s' "$_mig_hash" | sed 's/\$/\$\$/g')
+            _needs_rewrite=0
             if [ "$_mig_hash" != "$_mig_escaped" ]; then
+                _needs_rewrite=1
+            fi
+            if [ -z "$_mig_token" ]; then
+                _mig_token=$(openssl rand -hex 32)
+                _needs_rewrite=1
+            fi
+            if ! grep -q '^UPDATER_WORKSPACE_DIR=' "$env_file"; then
+                _needs_rewrite=1
+            fi
+            if [ "$_needs_rewrite" -eq 1 ]; then
                 {
+                    grep -v -E '^(JWT_SECRET|REDIS_PASSWORD|ADMIN_USERNAME|ADMIN_PASSWORD_HASH|UPDATER_SHARED_TOKEN|UPDATER_WORKSPACE_DIR)=' "$env_file"
                     printf 'JWT_SECRET=%s\n'          "$_mig_jwt"
                     printf 'REDIS_PASSWORD=%s\n'      "$_mig_redis"
                     printf 'ADMIN_USERNAME=%s\n'      "$_mig_user"
                     printf 'ADMIN_PASSWORD_HASH=%s\n' "$_mig_escaped"
+                    printf 'UPDATER_SHARED_TOKEN=%s\n' "$_mig_token"
+                    printf 'UPDATER_WORKSPACE_DIR=%s\n' "/opt/safeline-waf"
                 } > "$env_file"
                 chmod 600 "$env_file"
-                info "已将 ADMIN_PASSWORD_HASH 中的 \$ 转义为 \$\$ 以兼容 docker-compose"
+                info "已补齐在线更新所需的 .env 字段，并修复 docker-compose 兼容性"
             fi
             return 0
         fi
@@ -643,6 +661,7 @@ prepare_env() {
 
     jwt_secret=$(openssl rand -base64 48 | tr -d '\n')
     redis_password=$(openssl rand -hex 32)
+    updater_shared_token=$(openssl rand -hex 32)
 
     # 写入 .env 前严格校验哈希格式，防止任何非哈希值被写入
     if ! printf '%s' "$admin_password_hash" | grep -qE '^\$2[ab]\$[0-9]{2}\$'; then
@@ -660,6 +679,8 @@ prepare_env() {
         printf 'REDIS_PASSWORD=%s\n'      "$redis_password"
         printf 'ADMIN_USERNAME=%s\n'      "$admin_username"
         printf 'ADMIN_PASSWORD_HASH=%s\n' "$escaped_hash"
+        printf 'UPDATER_SHARED_TOKEN=%s\n' "$updater_shared_token"
+        printf 'UPDATER_WORKSPACE_DIR=%s\n' "/opt/safeline-waf"
     } > "$env_file"
     chmod 600 "$env_file"
 
