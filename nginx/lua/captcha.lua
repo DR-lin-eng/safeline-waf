@@ -57,6 +57,22 @@ local function get_step_up_verification_type(token_data)
     return "captcha"
 end
 
+local function ensure_token_verification_type(token_data, expected_type)
+    if type(token_data) ~= "table" then
+        return false, "Invalid token"
+    end
+
+    if type(expected_type) ~= "string" or expected_type == "" then
+        return true
+    end
+
+    if token_data.verification_type ~= expected_type then
+        return false, "Verification type mismatch"
+    end
+
+    return true
+end
+
 local function challenge_matches_token(stored_payload, token_data, client_ip, user_agent)
     if type(stored_payload) ~= "table" or type(token_data) ~= "table" then
         return false, "Invalid challenge context"
@@ -108,11 +124,15 @@ local function issue_verified_response(token_data, client_ip, user_agent)
         ttl = max_ttl
     end
 
+    local bindings = type(token_data.verification_bindings) == "table" and token_data.verification_bindings or {}
+    local bind_ip = bindings.ip_address ~= false
+    local bind_user_agent = bindings.user_agent ~= false
+
     local verified_token = {
         original_url = token_data.original_url,
         verified = true,
-        ip = client_ip,
-        ua_hash = ngx.md5(user_agent or ""),
+        ip = bind_ip and client_ip or nil,
+        ua_hash = bind_user_agent and ngx.md5(user_agent or "") or nil,
         issued_at = ngx.time(),
         expires = ngx.time() + ttl,
         verification_type = token_data.verification_type,
@@ -121,7 +141,11 @@ local function issue_verified_response(token_data, client_ip, user_agent)
         path = token_data.path,
         path_prefix = token_data.path_prefix,
         method = token_data.method,
-        scope_mode = token_data.scope_mode
+        scope_mode = token_data.scope_mode,
+        verification_bindings = {
+            ip_address = bind_ip,
+            user_agent = bind_user_agent
+        }
     }
     local verified_token_str = utils.encrypt_token(verified_token)
 
@@ -154,6 +178,7 @@ local function issue_step_up_response(token_data)
         path = path,
         method = method,
         scope_mode = "path_exact",
+        verification_bindings = token_data.verification_bindings,
         grant_ttl = grant_ttl,
         step_up_required = false,
         expires = ngx.time() + 900
@@ -305,6 +330,15 @@ local function handle_captcha_api()
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
             return ngx.exit(ngx.OK)
         end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "captcha")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
+            return ngx.exit(ngx.OK)
+        end
+        local bindings = type(token_data.verification_bindings) == "table" and token_data.verification_bindings or {}
+        local bind_ip = bindings.ip_address ~= false
+        local bind_user_agent = bindings.user_agent ~= false
 
         local captcha_code = generate_captcha_code()
         local challenge_id = generate_challenge_id()
@@ -313,8 +347,8 @@ local function handle_captcha_api()
         local captcha_key = "captcha:ch:" .. challenge_id
         cache_dict:set(captcha_key, cjson.encode({
             code = captcha_code,
-            ip = client_ip,
-            ua_hash = ngx.md5(user_agent or ""),
+            ip = bind_ip and client_ip or nil,
+            ua_hash = bind_user_agent and ngx.md5(user_agent or "") or nil,
             host = token_data.host,
             path = token_data.path,
             reason = token_data.reason,
@@ -367,6 +401,12 @@ local function handle_captcha_api()
         if not token_data or not token_data.original_url or token_data.expires <= ngx.time() then
             ngx.status = ngx.HTTP_BAD_REQUEST
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
+            return ngx.exit(ngx.OK)
+        end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "captcha")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
             return ngx.exit(ngx.OK)
         end
 
@@ -461,6 +501,12 @@ local function handle_captcha_api()
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
             return ngx.exit(ngx.OK)
         end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "slider")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
+            return ngx.exit(ngx.OK)
+        end
 
         -- 以challenge_id为key获取服务端存储的滑块位置（不暴露给客户端）
         local slider_key = "slider:ch:" .. challenge_id
@@ -539,6 +585,12 @@ local function handle_captcha_api()
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
             return ngx.exit(ngx.OK)
         end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "pow")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
+            return ngx.exit(ngx.OK)
+        end
 
         local success, message = pow.verify_solution(client_ip, token_data, user_agent)
 
@@ -568,13 +620,23 @@ local function handle_captcha_api()
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
             return ngx.exit(ngx.OK)
         end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "pow")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
+            return ngx.exit(ngx.OK)
+        end
 
         local original_uri = ngx.re.match(token_data.original_url, "https?://[^/]+([^?]+)")
         local uri_path = original_uri and original_uri[1] or "/"
+        local bindings = type(token_data.verification_bindings) == "table" and token_data.verification_bindings or {}
+        local bind_ip = bindings.ip_address ~= false
+        local bind_user_agent = bindings.user_agent ~= false
 
         local difficulty = tonumber(token_data.difficulty)
         local challenge = pow.generate_challenge(client_ip, uri_path, difficulty, {
-            ua_hash = ngx.md5(user_agent or ""),
+            ip = bind_ip and client_ip or nil,
+            ua_hash = bind_user_agent and ngx.md5(user_agent or "") or nil,
             host = token_data.host,
             path = token_data.path,
             reason = token_data.reason,
@@ -607,6 +669,15 @@ local function handle_captcha_api()
             ngx.say(cjson.encode({ success = false, message = "Invalid token" }))
             return ngx.exit(ngx.OK)
         end
+        local type_ok, type_message = ensure_token_verification_type(token_data, "slider")
+        if not type_ok then
+            ngx.status = ngx.HTTP_BAD_REQUEST
+            ngx.say(cjson.encode({ success = false, message = type_message }))
+            return ngx.exit(ngx.OK)
+        end
+        local bindings = type(token_data.verification_bindings) == "table" and token_data.verification_bindings or {}
+        local bind_ip = bindings.ip_address ~= false
+        local bind_user_agent = bindings.user_agent ~= false
 
         local track_width = 300
         local button_width = 40
@@ -617,8 +688,8 @@ local function handle_captcha_api()
         local slider_key = "slider:ch:" .. challenge_id
         cache_dict:set(slider_key, cjson.encode({
             position = position,
-            ip = client_ip,
-            ua_hash = ngx.md5(user_agent or ""),
+            ip = bind_ip and client_ip or nil,
+            ua_hash = bind_user_agent and ngx.md5(user_agent or "") or nil,
             host = token_data.host,
             path = token_data.path,
             reason = token_data.reason,

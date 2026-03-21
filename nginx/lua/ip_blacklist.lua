@@ -35,6 +35,8 @@ local _cached_cfg_version = nil
 local _cached_cache_cfg = nil
 local _cached_ranges_raw = nil
 local _cached_ranges = nil
+local _cached_feed_ranges = nil
+local _cached_feed_ranges_loaded_at = 0
 
 local function get_cache_cfg()
     local version = tonumber(config_dict:get("config_version") or 0) or 0
@@ -206,6 +208,36 @@ local function get_raw_ip_ranges()
     return safe_decode_table(config_dict:get("ip_ranges") or "[]", {})
 end
 
+local function get_feed_ranges(cache_cfg)
+    local now = ngx.time()
+    if _cached_feed_ranges and (now - _cached_feed_ranges_loaded_at) < 60 then
+        return _cached_feed_ranges
+    end
+
+    local red = utils.get_redis(cache_cfg.redis_timeout_ms)
+    if not red then
+        return _cached_feed_ranges or {}
+    end
+
+    local raw = red:get("safeline:blacklist_feed:ranges")
+    utils.release_redis(red)
+
+    local parsed = {}
+    if raw and raw ~= ngx.null then
+        local decoded = safe_decode_table(raw, {})
+        for _, entry in ipairs(decoded) do
+            local range = parse_range_entry(entry)
+            if range then
+                parsed[#parsed + 1] = range
+            end
+        end
+    end
+
+    _cached_feed_ranges = parsed
+    _cached_feed_ranges_loaded_at = now
+    return parsed
+end
+
 local function store_ip_ranges(entries)
     local ok = config_dict:set("ip_ranges", cjson.encode(entries))
     if ok then
@@ -288,6 +320,22 @@ function _M.is_blacklisted(ip)
         end
     end
 
+    for _, range in ipairs(get_feed_ranges(cache_cfg)) do
+        local matched = false
+        if range.type == "range" and ip_num then
+            matched = ip_num >= range.start and ip_num <= range.finish
+        elseif range.type == "cidr" then
+            matched = utils.ip_matches_cidr(ip, range.parsed)
+        end
+
+        if matched then
+            if lru then
+                lru:set(ip, true, cache_cfg.positive_default_ttl)
+            end
+            return true
+        end
+    end
+
     -- Bloom：如果明确“不在黑名单”，可直接跳过Redis（默认关闭，避免控制面延迟导致漏拦）
     if blacklist_bloom and blacklist_bloom.maybe_contains then
         local maybe = blacklist_bloom.maybe_contains(ip)
@@ -303,9 +351,11 @@ function _M.is_blacklisted(ip)
     local red = utils.get_redis(cache_cfg.redis_timeout_ms)
     if red then
         local key = "safeline:blacklist:" .. ip
+        local feed_key = "safeline:blacklist_feed:ips"
         red:init_pipeline()
         red:get(key)
         red:ttl(key)
+        red:sismember(feed_key, ip)
 
         local res, err = red:commit_pipeline()
         if not res then
@@ -316,8 +366,9 @@ function _M.is_blacklisted(ip)
 
         local value = res[1]
         local ttl = tonumber(res[2]) or -2
+        local feedMatched = tonumber(res[3]) == 1
 
-        if value and value ~= ngx.null then
+        if (value and value ~= ngx.null) or feedMatched then
             local cache_ttl = cache_cfg.positive_default_ttl
             if ttl and ttl > 0 then
                 cache_ttl = ttl

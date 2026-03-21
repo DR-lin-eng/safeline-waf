@@ -58,9 +58,208 @@ Guidelines:
 - ban_1h: medium-confidence attack or aggressive scanning
 - challenge: suspicious but not confirmed (bots, scrapers)
 - log: low risk, just note it
-- pass: clearly benign`;
+- pass: clearly benign
+- If review metadata contains ban_candidate=true, choose the ban duration based on evidence and confidence
+- Treat suggested_ban_ttl as an operator hint when choosing between ban_1h, ban_24h, and ban_permanent
+- current_request_disposition describes what the WAF already did to the current request; your action should decide future handling for this IP`;
+
+const VERDICT_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['risk_level', 'attack_type', 'reason', 'action', 'confidence'],
+  properties: {
+    risk_level: {
+      type: 'string',
+      enum: ['critical', 'high', 'medium', 'low', 'benign']
+    },
+    attack_type: {
+      type: 'string',
+      enum: ['sqli', 'xss', 'ssrf', 'rce', 'path_traversal', 'spam', 'scraping', 'credential_stuffing', 'benign', 'other']
+    },
+    reason: {
+      type: 'string',
+      maxLength: 120
+    },
+    action: {
+      type: 'string',
+      enum: ['ban_permanent', 'ban_24h', 'ban_1h', 'challenge', 'log', 'pass']
+    },
+    confidence: {
+      type: 'number',
+      minimum: 0,
+      maximum: 1
+    }
+  }
+};
+
+function normalizeProviderType(value) {
+  const provider = String(value || '').trim();
+  if (provider === 'anthropic' || provider === 'openai_responses') {
+    return provider;
+  }
+  return 'openai';
+}
+
+function defaultEndpointForProvider(provider) {
+  if (provider === 'anthropic') {
+    return 'https://api.anthropic.com';
+  }
+  if (provider === 'openai_responses') {
+    return 'https://api.openai.com/v1/responses';
+  }
+  return 'https://api.openai.com/v1';
+}
+
+function defaultModelForProvider(provider) {
+  if (provider === 'anthropic') {
+    return 'claude-haiku-4-5-20251001';
+  }
+  if (provider === 'openai_responses') {
+    return 'gpt-5.4';
+  }
+  return 'gpt-4o-mini';
+}
+
+function normalizeProviderId(value, fallback) {
+  const normalized = String(value || fallback || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || String(fallback || 'provider').toLowerCase();
+}
+
+function legacyProvidersFromConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') {
+    return [];
+  }
+  if (Array.isArray(cfg.providers)) {
+    return cfg.providers;
+  }
+  if (!cfg.provider && !cfg.api_endpoint && !cfg.model && !cfg.api_key_enc) {
+    return [];
+  }
+  return [{
+    id: 'provider-1',
+    name: 'Primary',
+    provider: cfg.provider,
+    api_endpoint: cfg.api_endpoint,
+    model: cfg.model,
+    api_key_enc: cfg.api_key_enc,
+    enabled: cfg.enabled !== false,
+    timeout_ms: cfg.timeout_ms,
+  }];
+}
+
+function normalizeNumber(value, fallback, min, max) {
+  let number = Number(value);
+  if (!Number.isFinite(number)) {
+    number = Number(fallback);
+  }
+  if (!Number.isFinite(number)) {
+    number = min;
+  }
+  if (number < min) number = min;
+  if (number > max) number = max;
+  return number;
+}
+
+function normalizeLlmConfig(input, existingConfig, jwtSecret) {
+  const source = input && typeof input === 'object' ? input : {};
+  const existing = existingConfig && typeof existingConfig === 'object' ? existingConfig : {};
+  const existingProviders = legacyProvidersFromConfig(existing);
+  const existingById = new Map(existingProviders.map((provider, index) => {
+    const id = normalizeProviderId(provider && provider.id, `provider-${index + 1}`);
+    return [id, provider || {}];
+  }));
+
+  const sourceProviders = Array.isArray(source.providers) ? source.providers : legacyProvidersFromConfig(source);
+  const normalizedProviders = [];
+  const seen = new Set();
+
+  sourceProviders.forEach((provider, index) => {
+    const draft = provider && typeof provider === 'object' ? provider : {};
+    const providerId = normalizeProviderId(draft.id, `provider-${index + 1}`);
+    if (seen.has(providerId)) {
+      return;
+    }
+    seen.add(providerId);
+
+    const previous = existingById.get(providerId) || {};
+    const providerType = normalizeProviderType(draft.provider || previous.provider || 'openai_responses');
+    let apiKeyEnc = previous.api_key_enc || '';
+    if (typeof draft.api_key === 'string' && draft.api_key.trim() && !draft.api_key.startsWith('••')) {
+      apiKeyEnc = encryptApiKey(draft.api_key.trim(), jwtSecret);
+    } else if (typeof draft.api_key_enc === 'string' && draft.api_key_enc) {
+      apiKeyEnc = draft.api_key_enc;
+    }
+
+    normalizedProviders.push({
+      id: providerId,
+      name: String(draft.name || previous.name || `Provider ${index + 1}`).trim() || `Provider ${index + 1}`,
+      provider: providerType,
+      api_endpoint: String(draft.api_endpoint || previous.api_endpoint || defaultEndpointForProvider(providerType)).trim(),
+      model: String(draft.model || previous.model || defaultModelForProvider(providerType)).trim(),
+      api_key_enc: apiKeyEnc,
+      enabled: draft.enabled !== undefined ? !!draft.enabled : previous.enabled !== false,
+      timeout_ms: normalizeNumber(draft.timeout_ms ?? previous.timeout_ms ?? source.timeout_ms ?? existing.timeout_ms ?? 15000, 15000, 3000, 60000),
+    });
+  });
+
+  if (normalizedProviders.length === 0) {
+    normalizedProviders.push({
+      id: 'provider-1',
+      name: 'Primary',
+      provider: 'openai_responses',
+      api_endpoint: defaultEndpointForProvider('openai_responses'),
+      model: defaultModelForProvider('openai_responses'),
+      api_key_enc: '',
+      enabled: true,
+      timeout_ms: normalizeNumber(source.timeout_ms ?? existing.timeout_ms ?? 15000, 15000, 3000, 60000),
+    });
+  }
+
+  return {
+    enabled: source.enabled !== undefined ? !!source.enabled : !!existing.enabled,
+    failover_enabled: source.failover_enabled !== undefined ? !!source.failover_enabled : existing.failover_enabled !== false,
+    providers: normalizedProviders,
+    autoban_min_confidence: normalizeNumber(source.autoban_min_confidence ?? existing.autoban_min_confidence ?? 0.75, 0.75, 0.5, 1),
+    batch_size: Math.floor(normalizeNumber(source.batch_size ?? existing.batch_size ?? 3, 3, 1, 10)),
+    call_delay_ms: Math.floor(normalizeNumber(source.call_delay_ms ?? existing.call_delay_ms ?? 200, 200, 0, 10000)),
+    verdict_cache_ttl_s: Math.floor(normalizeNumber(source.verdict_cache_ttl_s ?? existing.verdict_cache_ttl_s ?? 600, 600, 60, 86400)),
+    timeout_ms: Math.floor(normalizeNumber(source.timeout_ms ?? existing.timeout_ms ?? 15000, 15000, 3000, 60000)),
+    audit_triggers: Array.isArray(source.audit_triggers)
+      ? source.audit_triggers
+      : (Array.isArray(existing.audit_triggers) ? existing.audit_triggers : ['ml_gray_zone', 'payload_suspicious', 'high_block_rate']),
+    updated_at: Date.now(),
+  };
+}
+
+function sanitizeLlmConfigForClient(cfg) {
+  if (!cfg || typeof cfg !== 'object') {
+    return null;
+  }
+  const out = JSON.parse(JSON.stringify(cfg));
+  if (Array.isArray(out.providers)) {
+    out.providers = out.providers.map((provider) => {
+      const clone = { ...provider };
+      if (clone.api_key_enc) {
+        clone.api_key_masked = '••••••••' + clone.api_key_enc.slice(-4);
+        delete clone.api_key_enc;
+      }
+      return clone;
+    });
+  }
+  delete out.api_key_enc;
+  delete out.api_key;
+  return out;
+}
 
 function buildUserPrompt(entry) {
+  const metadata = entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : null;
+  const metadataText = metadata
+    ? `\nReview metadata: ${JSON.stringify(metadata).slice(0, 400)}`
+    : '';
   return `Analyze this web request:
 IP: ${entry.ip}
 Host: ${entry.host || '-'}
@@ -70,7 +269,7 @@ User-Agent: ${entry.ua || '-'}
 Referer: ${entry.referer || '-'}
 Body preview: ${entry.body_preview || '(none)'}
 WAF trigger reason: ${entry.trigger_reason}
-ML risk score: ${entry.ml_score || 0}`;
+ML risk score: ${entry.ml_score || 0}${metadataText}`;
 }
 
 // ── LLM API callers ────────────────────────────────────────────────────────
@@ -84,6 +283,7 @@ async function callOpenAICompatible(config, entry) {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user',   content: buildUserPrompt(entry) },
     ],
+    response_format: { type: 'json_object' },
     max_tokens:  256,
     temperature: 0.1,
   });
@@ -103,10 +303,116 @@ async function callOpenAICompatible(config, entry) {
       let data = '';
       res.on('data', d => { data += d; });
       res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`LLM HTTP ${res.statusCode}: ` + data.slice(0, 200)));
+          return;
+        }
         try {
           const parsed = JSON.parse(data);
           const content = parsed.choices?.[0]?.message?.content || '';
           resolve(content.trim());
+        } catch (e) {
+          reject(new Error('LLM response parse error: ' + data.slice(0, 200)));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(parseInt(config.timeout_ms || '15000', 10), () => {
+      req.destroy(new Error('LLM request timeout'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+async function callOpenAIResponses(config, entry) {
+  const https = config.api_endpoint.startsWith('https') ? require('https') : require('http');
+  const url = new URL(config.api_endpoint);
+  const body = JSON.stringify({
+    model: config.model || 'gpt-5.4',
+    input: [
+      {
+        role: 'system',
+        content: [
+          { type: 'input_text', text: SYSTEM_PROMPT }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: buildUserPrompt(entry) }
+        ]
+      }
+    ],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'waf_verdict',
+        strict: true,
+        schema: VERDICT_JSON_SCHEMA
+      }
+    },
+    max_output_tokens: 256,
+    temperature: 0.1
+  });
+
+  function extractResponseText(parsed) {
+    if (typeof parsed.output_text === 'string' && parsed.output_text.trim()) {
+      return parsed.output_text.trim();
+    }
+
+    if (Array.isArray(parsed.output)) {
+      const parts = [];
+      for (const item of parsed.output) {
+        if (!item || !Array.isArray(item.content)) continue;
+        for (const content of item.content) {
+          if (!content) continue;
+          if (typeof content.text === 'string' && content.text.trim()) {
+            parts.push(content.text.trim());
+          } else if (
+            content.type === 'output_text'
+            && typeof content.text === 'string'
+            && content.text.trim()
+          ) {
+            parts.push(content.text.trim());
+          }
+        }
+      }
+      if (parts.length > 0) {
+        return parts.join('\n').trim();
+      }
+    }
+
+    return '';
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.api_key}`,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', d => { data += d; });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`LLM HTTP ${res.statusCode}: ` + data.slice(0, 200)));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const content = extractResponseText(parsed);
+          if (!content) {
+            reject(new Error('LLM response parse error: ' + data.slice(0, 200)));
+            return;
+          }
+          resolve(content);
         } catch (e) {
           reject(new Error('LLM response parse error: ' + data.slice(0, 200)));
         }
@@ -168,8 +474,66 @@ async function callLLM(config, entry) {
   if (config.provider === 'anthropic') {
     return callAnthropicClaude(config, entry);
   }
+  if (config.provider === 'openai_responses' || /\/responses\/?$/.test(config.api_endpoint || '')) {
+    return callOpenAIResponses(config, entry);
+  }
   // Default: OpenAI-compatible (works with OpenAI, DeepSeek, Ollama, etc.)
   return callOpenAICompatible(config, entry);
+}
+
+async function callLLMWithFailover(config, entry) {
+  const normalized = (!config || !Array.isArray(config.providers))
+    ? (() => {
+        const providerType = normalizeProviderType(config && config.provider);
+        return {
+          failover_enabled: config ? config.failover_enabled !== false : true,
+          timeout_ms: config ? config.timeout_ms : 15000,
+          providers: [{
+            id: 'provider-1',
+            name: 'Primary',
+            enabled: config ? config.enabled !== false : true,
+            provider: providerType,
+            api_endpoint: (config && config.api_endpoint) || defaultEndpointForProvider(providerType),
+            model: (config && config.model) || defaultModelForProvider(providerType),
+            api_key: config && config.api_key,
+            timeout_ms: config && config.timeout_ms,
+          }],
+        };
+      })()
+    : {
+        failover_enabled: config.failover_enabled !== false,
+        timeout_ms: config.timeout_ms,
+        providers: config.providers,
+      };
+  const providers = Array.isArray(normalized.providers)
+    ? normalized.providers.filter((provider) => provider.enabled !== false && provider.api_key)
+    : [];
+
+  if (providers.length === 0) {
+    throw new Error('No enabled LLM providers configured');
+  }
+
+  const errors = [];
+  for (const provider of providers) {
+    try {
+      const text = await callLLM({
+        ...normalized,
+        ...provider,
+        timeout_ms: provider.timeout_ms || normalized.timeout_ms,
+      }, entry);
+      return {
+        text,
+        provider,
+      };
+    } catch (error) {
+      errors.push(`[${provider.id}] ${error.message}`);
+      if (normalized.failover_enabled === false) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(errors.join(' | ') || 'All LLM providers failed');
 }
 
 // ── Verdict parser ────────────────────────────────────────────────────────
@@ -247,16 +611,26 @@ class LLMWorker {
   async loadConfig() {
     const raw = await this.redis.get('llm:config');
     if (!raw) return null;
-    const cfg = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    const cfg = normalizeLlmConfig(parsed, parsed, this.jwtSecret);
     if (!cfg.enabled) return null;
 
-    // Decrypt API key
-    if (cfg.api_key_enc && this.jwtSecret) {
-      try {
-        cfg.api_key = decryptApiKey(cfg.api_key_enc, this.jwtSecret);
-      } catch (_) {
-        cfg.api_key = cfg.api_key_enc;  // fallback: stored plain (dev mode)
-      }
+    cfg.providers = cfg.providers
+      .map((provider) => {
+        const resolved = { ...provider };
+        if (resolved.api_key_enc && this.jwtSecret) {
+          try {
+            resolved.api_key = decryptApiKey(resolved.api_key_enc, this.jwtSecret);
+          } catch (_) {
+            resolved.api_key = resolved.api_key_enc;
+          }
+        }
+        return resolved;
+      })
+      .filter((provider) => provider.enabled !== false && provider.api_key);
+
+    if (cfg.providers.length === 0) {
+      return null;
     }
     return cfg;
   }
@@ -280,8 +654,11 @@ class LLMWorker {
     }
 
     let verdict;
+    let resolvedProvider = null;
     try {
-      const rawText = await callLLM(config, entry);
+      const result = await callLLMWithFailover(config, entry);
+      resolvedProvider = result.provider || null;
+      const rawText = result.text;
       verdict = parseVerdict(rawText);
     } catch (err) {
       console.warn(`[LLM] Analysis failed for ${ip}: ${err.message}`);
@@ -301,8 +678,11 @@ class LLMWorker {
       trigger_reason: entry.trigger_reason,
       ml_score:       entry.ml_score,
       analysed_at:    Date.now(),
-      model:          config.model,
-      provider:       config.provider || 'openai',
+      model:          resolvedProvider ? resolvedProvider.model : config.model,
+      provider:       resolvedProvider ? resolvedProvider.provider : 'openai',
+      provider_id:    resolvedProvider ? resolvedProvider.id : null,
+      provider_name:  resolvedProvider ? resolvedProvider.name : null,
+      metadata:       entry.metadata || null,
     };
 
     const verdictJson = JSON.stringify(fullVerdict);
@@ -324,7 +704,8 @@ class LLMWorker {
     }
 
     // Apply auto-ban if confidence meets threshold
-    if (verdict.confidence >= autobanMinConf && ACTION_TTL[verdict.action] !== undefined) {
+    const isBanCandidate = !!(entry.metadata && entry.metadata.ban_candidate);
+    if (ACTION_TTL[verdict.action] !== undefined && (isBanCandidate || verdict.confidence >= autobanMinConf)) {
       await applyBan(this.redis, ip, verdict.action, verdict.reason, autobanMinConf);
       await this.redis.incr('llm:stats:autobanned');
     }
@@ -388,6 +769,8 @@ module.exports = {
   LLMWorker,
   encryptApiKey,
   decryptApiKey,
-  callLLMDirect:    callLLM,
+  normalizeLlmConfigDirect: normalizeLlmConfig,
+  sanitizeLlmConfigForClientDirect: sanitizeLlmConfigForClient,
+  callLLMDirect:    callLLMWithFailover,
   parseVerdictDirect: parseVerdict,
 };

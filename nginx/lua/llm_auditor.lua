@@ -8,27 +8,95 @@ local utils      = require "utils"
 
 local cache_dict  = ngx.shared.safeline_cache
 local config_dict = ngx.shared.safeline_config
+local CONFIG_REFRESH_TTL = 5
+
+local function refresh_settings_async()
+    local now = ngx.time()
+    local loaded_at = tonumber(cache_dict:get("llm:settings:loaded_at") or 0) or 0
+    if (now - loaded_at) < CONFIG_REFRESH_TTL then
+        return
+    end
+
+    local locked, lock_err = cache_dict:add("llm:settings:refresh_lock", true, 1)
+    if not locked and lock_err ~= "exists" then
+        return
+    end
+    if not locked then
+        return
+    end
+
+    ngx.timer.at(0, function(premature)
+        if premature then
+            cache_dict:delete("llm:settings:refresh_lock")
+            return
+        end
+
+        local red = utils.get_redis(100)
+        if not red then
+            cache_dict:delete("llm:settings:refresh_lock")
+            return
+        end
+
+        local ok = pcall(function()
+            local enabled_raw = red:get("llm:enabled")
+            if enabled_raw ~= ngx.null and enabled_raw ~= nil then
+                cache_dict:set("llm:enabled", enabled_raw == "true" and "true" or "false", CONFIG_REFRESH_TTL * 2)
+            end
+
+            local cfg_raw = red:get("llm:config")
+            if cfg_raw ~= ngx.null and type(cfg_raw) == "string" and cfg_raw ~= "" then
+                local ok_cfg, cfg = pcall(cjson.decode, cfg_raw)
+                if ok_cfg and type(cfg) == "table" then
+                    if cfg.queue_max ~= nil then
+                        cache_dict:set("llm:queue_max", tonumber(cfg.queue_max) or 2000, CONFIG_REFRESH_TTL * 2)
+                    end
+                    if cfg.rate_window ~= nil then
+                        cache_dict:set("llm:rate_window", tonumber(cfg.rate_window) or 300, CONFIG_REFRESH_TTL * 2)
+                    end
+                    if cfg.rate_max ~= nil then
+                        cache_dict:set("llm:rate_max", tonumber(cfg.rate_max) or 3, CONFIG_REFRESH_TTL * 2)
+                    end
+                end
+            end
+
+            cache_dict:set("llm:settings:loaded_at", now, CONFIG_REFRESH_TTL * 2)
+        end)
+
+        if not ok then
+            ngx.log(ngx.WARN, "[LLM] Failed to refresh runtime settings")
+        end
+
+        utils.release_redis(red)
+        cache_dict:delete("llm:settings:refresh_lock")
+    end)
+end
 
 -- ── Config helpers ────────────────────────────────────────────────────────
 
 local function llm_enabled()
-    -- Fast path: check shared dict first (populated by config_loader)
-    local v = config_dict:get("llm:enabled")
+    refresh_settings_async()
+
+    local v = cache_dict:get("llm:enabled")
+    if v ~= nil then return v == "true" or v == true end
+    v = config_dict:get("llm:enabled")
     if v ~= nil then return v == "true" or v == true end
     return os.getenv("LLM_ENABLED") == "true"
 end
 
 local function queue_max_size()
-    return tonumber(config_dict:get("llm:queue_max") or "2000") or 2000
+    refresh_settings_async()
+    return tonumber(cache_dict:get("llm:queue_max") or config_dict:get("llm:queue_max") or "2000") or 2000
 end
 
 local function rate_limit_window()
+    refresh_settings_async()
     -- Max entries queued per IP per window (to contain LLM API cost)
-    return tonumber(config_dict:get("llm:rate_window") or "300") or 300  -- 5 minutes
+    return tonumber(cache_dict:get("llm:rate_window") or config_dict:get("llm:rate_window") or "300") or 300  -- 5 minutes
 end
 
 local function rate_limit_max()
-    return tonumber(config_dict:get("llm:rate_max") or "3") or 3
+    refresh_settings_async()
+    return tonumber(cache_dict:get("llm:rate_max") or config_dict:get("llm:rate_max") or "3") or 3
 end
 
 -- ── Per-IP rate limiting ───────────────────────────────────────────────────
@@ -48,7 +116,33 @@ end
 -- The Node.js worker writes  llm:verdict:{ip} = JSON  with TTL after analysis.
 
 function _M.get_cached_verdict(client_ip)
-    local raw = cache_dict:get("llm:verdict:" .. client_ip)
+    local verdict_key = "llm:verdict:" .. client_ip
+    local negative_key = verdict_key .. ":miss"
+    local raw = cache_dict:get(verdict_key)
+    if not raw and not cache_dict:get(negative_key) then
+        local red = utils.get_redis(50)
+        if red then
+            red:init_pipeline()
+            red:get(verdict_key)
+            red:ttl(verdict_key)
+
+            local res = red:commit_pipeline()
+            utils.release_redis(red)
+
+            if type(res) == "table" then
+                local remote_raw = res[1]
+                local remote_ttl = tonumber(res[2]) or 0
+                if remote_raw and remote_raw ~= ngx.null and type(remote_raw) == "string" and remote_raw ~= "" then
+                    cache_dict:set(verdict_key, remote_raw, math.max(1, math.min(remote_ttl > 0 and remote_ttl or 10, 30)))
+                    cache_dict:delete(negative_key)
+                    raw = remote_raw
+                else
+                    cache_dict:set(negative_key, true, 5)
+                end
+            end
+        end
+    end
+
     if not raw then return nil end
     local ok, v = pcall(cjson.decode, raw)
     return ok and v or nil
@@ -59,7 +153,7 @@ end
 -- trigger_reason: human-readable string that explains why this was flagged
 -- ml_score: 0-1 ML confidence (optional)
 -- body_preview: truncated request body (optional, max 500 chars)
-function _M.queue_for_review(client_ip, uri, method, headers, body_preview, trigger_reason, ml_score)
+function _M.queue_for_review(client_ip, uri, method, headers, body_preview, trigger_reason, ml_score, metadata)
     if not llm_enabled() then return false, "llm_disabled" end
 
     -- Rate-limit per IP
@@ -90,6 +184,7 @@ function _M.queue_for_review(client_ip, uri, method, headers, body_preview, trig
         body_preview   = body_preview,
         trigger_reason = trigger_reason or "suspicious_traffic",
         ml_score       = ml_score or 0,
+        metadata       = type(metadata) == "table" and metadata or nil,
         queued_at      = ngx.time(),
     }
 
@@ -102,7 +197,7 @@ function _M.queue_for_review(client_ip, uri, method, headers, body_preview, trig
     local queue_key = "llm:audit:queue"
     local max_size  = queue_max_size()
 
-    ngx.timer.at(0, function(premature)
+    local scheduled, schedule_err = ngx.timer.at(0, function(premature)
         if premature then return end
         local red = utils.get_redis(200)
         if not red then return end
@@ -118,6 +213,11 @@ function _M.queue_for_review(client_ip, uri, method, headers, body_preview, trig
         end
         utils.release_redis(red)
     end)
+
+    if not scheduled then
+        ngx.log(ngx.WARN, "[LLM] Failed to schedule queue push: ", tostring(schedule_err))
+        return false, "schedule_failed"
+    end
 
     return true, "queued"
 end

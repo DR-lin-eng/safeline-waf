@@ -340,10 +340,10 @@ function _M.check_url_ddos(client_ip, uri)
     local global_count, global_err = safe_incr(limit_dict, global_key, 1, 0, url_window, math.huge)
 
     -- shared dict 内存不足时，直接进入”全局高压”防护分支，避免继续执行复杂逻辑放大开销
-    if url_err == “no memory” or ip_err == “no memory” or global_err == “no memory” then
-        utils.record_anomaly(client_ip, uri, “global_hard”, 6)
-        cf_shield.report_attack(“global_hard”, nil, 15)   -- 内存耗尽 = 极高压，立即上报高权重
-        return true, “global_hard”, math.huge, (global_hard_threshold > 0 and global_hard_threshold or 1)
+    if url_err == "no memory" or ip_err == "no memory" or global_err == "no memory" then
+        utils.record_anomaly(client_ip, uri, "global_hard", 6)
+        cf_shield.report_attack("global_hard", nil, 15)   -- 内存耗尽 = 极高压，立即上报高权重
+        return true, "global_hard", math.huge, (global_hard_threshold > 0 and global_hard_threshold or 1)
     end
     
     -- 动态调整阈值
@@ -407,11 +407,11 @@ function _M.check_url_ddos(client_ip, uri)
     end
 
     if global_burst_window > 0 and global_burst_threshold > 0 then
-        local burst_key = “ddos:global_burst:” .. uri_id
+        local burst_key = "ddos:global_burst:" .. uri_id
         local burst_count = safe_incr(limit_dict, burst_key, 1, 0, global_burst_window, math.huge)
         if burst_count > global_burst_threshold then
-            utils.record_anomaly(client_ip, uri, “global_burst”, 4)
-            return true, “global_burst”, burst_count, global_burst_threshold
+            utils.record_anomaly(client_ip, uri, "global_burst", 4)
+            return true, "global_burst", burst_count, global_burst_threshold
         end
     end
 
@@ -423,39 +423,39 @@ function _M.check_url_ddos(client_ip, uri)
         end
 
         if global_count >= track_start then
-            local seen_key = “ddos:uniq_seen:” .. uri_id .. “:” .. client_ip
+            local seen_key = "ddos:uniq_seen:" .. uri_id .. ":" .. client_ip
             local added, add_err = limit_dict:add(seen_key, 1, unique_ip_window)
             if added then
-                local uniq_key = “ddos:uniq:” .. uri_id
+                local uniq_key = "ddos:uniq:" .. uri_id
                 local uniq_count = safe_incr(limit_dict, uniq_key, 1, 0, unique_ip_window, math.huge)
                 if uniq_count > unique_ip_threshold then
-                    utils.record_anomaly(client_ip, uri, “global_unique_ip_surge”, 3)
-                    return true, “unique_ip_surge”, uniq_count, unique_ip_threshold
+                    utils.record_anomaly(client_ip, uri, "global_unique_ip_surge", 3)
+                    return true, "unique_ip_surge", uniq_count, unique_ip_threshold
                 end
-            elseif add_err == “no memory” then
+            elseif add_err == "no memory" then
                 -- shared dict 已接近耗尽：视为系统处于高压状态，触发更强的全局防护
-                return true, “global_hard”, math.huge, effective_global_hard_threshold
+                return true, "global_hard", math.huge, effective_global_hard_threshold
             else
-                local uniq_key = “ddos:uniq:” .. uri_id
+                local uniq_key = "ddos:uniq:" .. uri_id
                 local uniq_count = tonumber(limit_dict:get(uniq_key) or 0) or 0
                 if uniq_count > unique_ip_threshold then
-                    utils.record_anomaly(client_ip, uri, “global_unique_ip_surge”, 3)
-                    return true, “unique_ip_surge”, uniq_count, unique_ip_threshold
+                    utils.record_anomaly(client_ip, uri, "global_unique_ip_surge", 3)
+                    return true, "unique_ip_surge", uniq_count, unique_ip_threshold
                 end
             end
         end
     end
 
     if global_count > effective_global_hard_threshold then
-        utils.record_anomaly(client_ip, uri, “global_hard”, 5)
-        cf_shield.report_attack(“global_hard”, global_count / effective_global_hard_threshold)
-        return true, “global_hard”, global_count, effective_global_hard_threshold
+        utils.record_anomaly(client_ip, uri, "global_hard", 5)
+        cf_shield.report_attack("global_hard", global_count / effective_global_hard_threshold)
+        return true, "global_hard", global_count, effective_global_hard_threshold
     end
 
     if global_count > effective_global_threshold then
-        utils.record_anomaly(client_ip, uri, “global_pressure”, 3)
-        cf_shield.report_attack(“global_pressure”, global_count / effective_global_threshold)
-        return true, “global_pressure”, global_count, effective_global_threshold
+        utils.record_anomaly(client_ip, uri, "global_pressure", 3)
+        cf_shield.report_attack("global_pressure", global_count / effective_global_threshold)
+        return true, "global_pressure", global_count, effective_global_threshold
     end
 
     -- 进行行为模式分析
@@ -659,7 +659,7 @@ function _M.check_random_requests(client_ip)
     local args = ngx.req.get_uri_args()
     
     -- 保存最近的请求方法历史
-    local method_key = "methods:" .. client_ip
+    local method_key = "random:methods:" .. client_ip
     local methods = safe_decode_table(cache_dict:get(method_key) or "[]", {})
     
     -- 更新方法历史
@@ -724,13 +724,13 @@ function _M.check_random_requests(client_ip)
             unique_count = unique_count + 1
         end
         
-        if unique_count >= 5 then
+        if unique_count >= 4 then
             return true, "random_paths"
         end
     end
 
     -- 指纹变化过快：结构变化非常多（常见于随机参数/自动化变形）
-    if #fps >= 8 then
+    if #fps >= 6 then
         local unique_fps = {}
         for _, f in ipairs(fps) do
             unique_fps[f] = true
@@ -741,7 +741,7 @@ function _M.check_random_requests(client_ip)
             unique_count = unique_count + 1
         end
 
-        if unique_count >= 8 then
+        if unique_count >= 6 then
             return true, "random_fingerprints"
         end
     end

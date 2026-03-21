@@ -117,7 +117,7 @@ function _M.generate_challenge(client_ip, uri, difficulty, context)
         difficulty = difficulty,
         expires = ngx.time() + 300, -- 5分钟有效期
         uri = uri,
-        ip = client_ip,
+        ip = context and context.ip or client_ip,
         ua_hash = context and context.ua_hash or nil,
         host = context and context.host or nil,
         path = context and context.path or uri,

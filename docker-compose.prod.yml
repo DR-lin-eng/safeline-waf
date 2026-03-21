@@ -31,8 +31,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET
       - NODE_ID=${NODE_ID:-node-1}
-      - NODE_ROLE=${NODE_ROLE:-worker}
-      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
+      - NODE_ROLE=${NODE_ROLE:-secondary}
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -40,7 +40,7 @@ services:
     networks:
       - safeline-network
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/_metrics"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -92,7 +92,9 @@ services:
       - ADMIN_PASSWORD_HASH
       - NODE_ENV=${NODE_ENV:-production}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
-      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
+      - NODE_ID=${NODE_ID:-node-1}
+      - NODE_ROLE=${NODE_ROLE:-secondary}
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-false}
       - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30}
     depends_on:
       redis:
@@ -154,7 +156,7 @@ services:
     networks:
       - safeline-network
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
       interval: 15s
       timeout: 5s
       retries: 3

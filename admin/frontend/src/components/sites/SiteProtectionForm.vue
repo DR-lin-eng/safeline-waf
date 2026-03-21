@@ -17,19 +17,50 @@
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('ip-blacklist')" v-model="site.protection.ip_blacklist_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('ip-blacklist')">IP 黑名单</label></div></div>
         </div>
         <div class="form-row">
-          <div class="form-group col-md-4"><div class="form-check"><input :id="id('ddos')" v-model="site.protection.ddos_protection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('ddos')">DDoS 防护</label></div></div>
-          <div class="form-group col-md-4"><div class="form-check"><input :id="id('anti-cc')" v-model="site.protection.anti_cc_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('anti-cc')">Anti-CC 防护</label></div></div>
-          <div class="form-group col-md-4"><div class="form-check"><input :id="id('random-attack')" v-model="site.protection.random_attack_protection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('random-attack')">随机攻击防护</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('credential-stuffing')" v-model="site.protection.credential_stuffing_detection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('credential-stuffing')">撞库检测</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('scraping-detection')" v-model="site.protection.scraping_detection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('scraping-detection')">内容抓取检测</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('inventory-hoarding')" v-model="site.protection.inventory_hoarding_detection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('inventory-hoarding')">囤货/抢购检测</label></div></div>
         </div>
         <div class="form-row">
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('ddos')" v-model="site.protection.ddos_protection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('ddos')">DDoS 防护</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('slow-ddos')" v-model="site.protection.slow_ddos_protection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('slow-ddos')">慢速 DDoS 防护</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('anti-cc')" v-model="site.protection.anti_cc_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('anti-cc')">Anti-CC 防护</label></div></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('random-attack')" v-model="site.protection.random_attack_protection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('random-attack')">随机攻击防护</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('js-encryption')" v-model="site.protection.js_encryption_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('js-encryption')">JS 加密</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('prevent-f12')" v-model="site.protection.prevent_browser_f12" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('prevent-f12')">防止浏览器 F12</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('honeypot')" v-model="site.protection.honeypot_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('honeypot')">蜜罐功能</label></div></div>
         </div>
         <div class="form-row">
-          <div class="form-group col-md-4"><div class="form-check"><input :id="id('auto-blacklist')" v-model="site.protection.auto_blacklist_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('auto-blacklist')">自动添加 IP 黑名单</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('auto-blacklist')" v-model="site.protection.auto_blacklist_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('auto-blacklist')">自动封禁候选审查</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('request-logging')" v-model="site.protection.request_logging_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('request-logging')">请求日志记录</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('traffic-analysis')" v-model="site.protection.traffic_analysis_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('traffic-analysis')">流量动态识别</label></div></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('llm-audit')" v-model="site.protection.llm_audit_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('llm-audit')">LLM 审计快路径</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('ml-bot')" v-model="site.protection.ml_bot_classification_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('ml-bot')">ML 机器人分类</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('ml-bot-autoban')" v-model="site.protection.ml_bot_autoban_enabled" :disabled="!site.protection.ml_bot_classification_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('ml-bot-autoban')">ML 高置信封禁候选</label></div></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <label :for="id('auto-blacklist-threshold')">自动黑名单触发分数</label>
+            <input :id="id('auto-blacklist-threshold')" v-model.number="site.protection.auto_blacklist_score_threshold" :disabled="!site.protection.auto_blacklist_enabled" type="number" class="form-control" min="1" max="200">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('auto-blacklist-duration')">自动黑名单时长 (秒)</label>
+            <input :id="id('auto-blacklist-duration')" v-model.number="site.protection.auto_blacklist_duration" :disabled="!site.protection.auto_blacklist_enabled" type="number" class="form-control" min="60" max="604800">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('ml-bot-challenge-threshold')">ML 审查阈值</label>
+            <input :id="id('ml-bot-challenge-threshold')" v-model.number="site.protection.ml_bot_challenge_threshold" :disabled="!site.protection.ml_bot_classification_enabled" type="number" class="form-control" min="0.5" max="1" step="0.01">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <label :for="id('ml-bot-ban-threshold')">ML 封禁建议阈值</label>
+            <input :id="id('ml-bot-ban-threshold')" v-model.number="site.protection.ml_bot_ban_threshold" :disabled="!site.protection.ml_bot_classification_enabled" type="number" class="form-control" min="0.5" max="1" step="0.01">
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group col-md-4">
@@ -37,9 +68,26 @@
             <input :id="id('log-sample-rate')" v-model.number="site.protection.log_sample_rate" :disabled="!site.protection.request_logging_enabled" type="number" class="form-control" min="0" max="1" step="0.01">
             <small class="form-text text-muted">0 表示仅记录拦截请求，0.01 表示约 1% 的放行请求会进入实时日志。</small>
           </div>
+          <div class="form-group col-md-4">
+            <label :for="id('stats-sample-rate')">统计采样率</label>
+            <input :id="id('stats-sample-rate')" v-model.number="site.protection.stats_sample_rate" :disabled="!site.protection.request_logging_enabled" type="number" class="form-control" min="0" max="1" step="0.01">
+            <small class="form-text text-muted">用于 Redis 指标回填的抽样率。</small>
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('verified-scrubbing-rps')">已验证用户清洗速率</label>
+            <input :id="id('verified-scrubbing-rps')" v-model.number="site.protection.verified_scrubbing_rps" type="number" class="form-control" min="1" max="1000">
+            <small class="form-text text-muted">高压场景下，已验证用户每秒允许通过的请求数。</small>
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('request-inspection')" v-model="site.protection.request_content_inspection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('request-inspection')">请求内容检测</label></div></div>
+          <div class="form-group col-md-4"><div class="form-check"><input :id="id('owasp-crs-enabled')" v-model="site.protection.owasp_crs_enabled" :disabled="!site.protection.request_content_inspection_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('owasp-crs-enabled')">OWASP CRS 风格规则</label></div></div>
+          <div class="form-group col-md-4">
+            <label :for="id('owasp-paranoia')">OWASP Paranoia Level</label>
+            <input :id="id('owasp-paranoia')" v-model.number="site.protection.owasp_paranoia_level" :disabled="!site.protection.request_content_inspection_enabled || !site.protection.owasp_crs_enabled" type="number" class="form-control" min="1" max="4">
+          </div>
+        </div>
+        <div class="form-row">
           <div class="form-group col-md-4">
             <label :for="id('request-body-max')">请求体扫描上限 (Bytes)</label>
             <input :id="id('request-body-max')" v-model="site.protection.request_body_max_bytes" :disabled="!site.protection.request_content_inspection_enabled" type="number" class="form-control" min="1024" step="1024">
@@ -47,6 +95,43 @@
           <div class="form-group col-md-4">
             <label :for="id('request-field-max')">单字段最大长度 (Bytes)</label>
             <input :id="id('request-field-max')" v-model="site.protection.request_field_max_len" :disabled="!site.protection.request_content_inspection_enabled" type="number" class="form-control" min="256" step="256">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('owasp-threshold')">OWASP 入站阈值</label>
+            <input :id="id('owasp-threshold')" v-model.number="site.protection.owasp_inbound_threshold" :disabled="!site.protection.request_content_inspection_enabled || !site.protection.owasp_crs_enabled" type="number" class="form-control" min="1" max="100">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <label :for="id('request-body-depth')">请求体结构深度</label>
+            <input :id="id('request-body-depth')" v-model.number="site.protection.request_body_max_depth" :disabled="!site.protection.request_content_inspection_enabled" type="number" class="form-control" min="1" max="128">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('graphql-depth')">GraphQL 深度限制</label>
+            <input :id="id('graphql-depth')" v-model.number="site.protection.graphql_max_depth" :disabled="!site.protection.request_content_inspection_enabled" type="number" class="form-control" min="1" max="64">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('owasp-max-matches')">OWASP 最大命中数</label>
+            <input :id="id('owasp-max-matches')" v-model.number="site.protection.owasp_max_matches" :disabled="!site.protection.request_content_inspection_enabled || !site.protection.owasp_crs_enabled" type="number" class="form-control" min="1" max="32">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <div class="form-check mt-4"><input :id="id('global-hard-drop')" v-model="site.protection.global_hard_drop_enabled" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('global-hard-drop')">全局高压优先丢弃</label></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <label :for="id('max-uri-length')">URI 最大长度</label>
+            <input :id="id('max-uri-length')" v-model.number="site.protection.max_uri_length" type="number" class="form-control" min="256" max="32768">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('max-header-count')">Header 数量限制</label>
+            <input :id="id('max-header-count')" v-model.number="site.protection.max_header_count" type="number" class="form-control" min="32" max="256">
+          </div>
+          <div class="form-group col-md-4">
+            <label :for="id('max-forwarded-hops')">Forwarded/XFF 跳数限制</label>
+            <input :id="id('max-forwarded-hops')" v-model.number="site.protection.max_forwarded_hops" type="number" class="form-control" min="4" max="64">
           </div>
         </div>
       </div>
@@ -107,8 +192,8 @@
         <div class="form-row">
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('verify-ip')" v-model="site.verification_methods.verification_methods.ip_address" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('verify-ip')">IP 地址</label></div></div>
           <div class="form-group col-md-4"><div class="form-check"><input :id="id('verify-ua')" v-model="site.verification_methods.verification_methods.user_agent" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('verify-ua')">User-Agent</label></div></div>
-          <div class="form-group col-md-4"><div class="form-check"><input :id="id('verify-cookie')" v-model="site.verification_methods.verification_methods.cookie" type="checkbox" class="form-check-input"><label class="form-check-label" :for="id('verify-cookie')">Cookie</label></div></div>
         </div>
+        <small class="form-text text-muted">验证结果仍通过安全 Cookie 传递，当前可配置的绑定维度为 IP 与 User-Agent。</small>
       </div>
     </div>
   </div>

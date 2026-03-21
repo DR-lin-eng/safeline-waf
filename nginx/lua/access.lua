@@ -6,7 +6,12 @@ local browser_detection = require "browser_detection"
 local ip_blacklist = require "ip_blacklist"
 local ddos_protection = require "ddos_protection"
 local llm_auditor = require "llm_auditor"
+local owasp_rules = require "owasp_rules"
 local feature_extractor = require "semantic.feature_extractor"
+local ok_ml_inference, ml_inference = pcall(require, "ml_inference")
+if not ok_ml_inference then
+    ml_inference = nil
+end
 
 -- 共享内存
 local config_dict = ngx.shared.safeline_config
@@ -23,6 +28,7 @@ local dangerous_methods = {
 }
 
 local normalize_inspection_text
+local ensure_request_id
 
 local function build_inspection_preview(value, max_len)
     if value == nil then
@@ -68,7 +74,12 @@ local function persist_inspection_summary(summary)
             return
         end
 
-        local red = utils.get_redis(200)
+        local ok_utils, timer_utils = pcall(require, "utils")
+        if not ok_utils or type(timer_utils) ~= "table" then
+            return
+        end
+
+        local red = timer_utils.get_redis(200)
         if not red then
             return
         end
@@ -84,7 +95,7 @@ local function persist_inspection_summary(summary)
             ngx.log(ngx.WARN, "[Inspection] Failed to persist inspection summary")
         end
 
-        utils.release_redis(red)
+        timer_utils.release_redis(red)
     end)
 
     return true
@@ -254,6 +265,29 @@ local function maybe_auto_blacklist(site_config, client_ip, total_score, duratio
         duration = 60
     end
 
+    local headers = ngx.req.get_headers()
+    local trigger_reason = ngx.ctx.auto_blacklist_reason or "auto_blacklist"
+    ngx.ctx.auto_blacklist_reason = nil
+    if site_config.llm_audit_enabled ~= false then
+        local queued = llm_auditor.queue_for_review(
+            client_ip,
+            ngx.var.uri or "/",
+            ngx.req.get_method(),
+            headers,
+            "",
+            trigger_reason,
+            math.min(1, total_score / math.max(threshold, 1)),
+            {
+                ban_candidate = true,
+                suggested_ban_ttl = duration,
+                current_request_disposition = "blocked_or_challenged_by_waf",
+                source = "auto_blacklist",
+                total_score = total_score
+            }
+        )
+        return queued == true
+    end
+
     ip_blacklist.add_to_blacklist(client_ip, duration)
     return true
 end
@@ -318,16 +352,14 @@ end
 
 local function get_verified_token(client_ip, user_agent)
     local cookie_value = ngx.var.cookie_safeline_verified
-    if not cookie_value then
-        return nil
-    end
-
     if cookie_value then
         local verified_token = utils.decrypt_token(cookie_value)
         local request_ctx = get_request_scope_context()
+        local ip_matches = verified_token and (not verified_token.ip or verified_token.ip == client_ip)
+        local ua_matches = verified_token and (not verified_token.ua_hash or verified_token.ua_hash == ngx.md5(user_agent or ""))
 
         if verified_token and verified_token.verified and verified_token.expires > ngx.time() and
-           verified_token.ip == client_ip and verified_token.ua_hash == ngx.md5(user_agent or "") and
+           ip_matches and ua_matches and
            matches_request_scope(verified_token, request_ctx) then
             return verified_token
         end
@@ -336,7 +368,7 @@ local function get_verified_token(client_ip, user_agent)
     return nil
 end
 
-local function ensure_request_id()
+ensure_request_id = function()
     if type(ngx.ctx.request_id) == "string" and ngx.ctx.request_id ~= "" then
         return ngx.ctx.request_id
     end
@@ -401,6 +433,18 @@ local function get_verification_grant_ttl(site_config, verification_type)
     return ttl
 end
 
+local function get_verification_binding_config(site_config)
+    local bindings = type(site_config) == "table" and type(site_config.verification_methods) == "table"
+        and type(site_config.verification_methods.verification_methods) == "table"
+        and site_config.verification_methods.verification_methods
+        or {}
+
+    return {
+        ip_address = bindings.ip_address ~= false,
+        user_agent = bindings.user_agent ~= false
+    }
+end
+
 local html_entity_map = {
     ["&lt;"] = "<",
     ["&gt;"] = ">",
@@ -409,30 +453,6 @@ local html_entity_map = {
     ["&apos;"] = "'",
     ["&amp;"] = "&",
     ["&colon;"] = ":"
-}
-
-local payload_signatures = {
-    { id = "xss_script_tag", pattern = [[<\s*script\b]], score = 10 },
-    { id = "xss_event_handler", pattern = [[on(?:error|load|click|mouseover|focus|submit|animationstart)\s*=]], score = 9 },
-    { id = "xss_javascript_uri", pattern = [[javascript\s*:]], score = 9 },
-    { id = "xss_data_html", pattern = [[data\s*:\s*text/html]], score = 9 },
-    { id = "xss_vbscript_uri", pattern = [[vbscript\s*:]], score = 9 },
-    { id = "xss_css_expression", pattern = [[expression\s*\(]], score = 8 },
-    { id = "xss_svg_onload", pattern = [[<\s*svg\b[^>]*onload\s*=]], score = 9 },
-    { id = "xss_srcdoc", pattern = [[srcdoc\s*=]], score = 8 },
-    { id = "sqli_union_select", pattern = [[union\s+all?\s*select\b]], score = 9 },
-    { id = "sqli_boolean_or", pattern = [[['"`]?\s*or\s+['"`]?\w+['"`]?\s*=\s*['"`]?\w+]], score = 8 },
-    { id = "sqli_time_delay", pattern = [[(?:sleep|benchmark|pg_sleep)\s*\(]], score = 10 },
-    { id = "sqli_waitfor_delay", pattern = [[waitfor\s+delay]], score = 10 },
-    { id = "sqli_stacked_query", pattern = [[;\s*(?:select|insert|update|delete|drop)\b]], score = 8 },
-    { id = "sqli_schema_probe", pattern = [[(?:information_schema|pg_catalog|sqlite_master)\b]], score = 8 },
-    { id = "path_traversal", pattern = [[(?:\.\.[/\\]+|\.{2,}\s*/+)|/etc/passwd|/proc/self/environ|/windows/win\.ini|boot\.ini|web\.config]], score = 8 },
-    { id = "ssrf_dangerous_scheme", pattern = [[\b(?:dict|gopher|file|jar|ldap|ldaps|tftp)\s*://]], score = 10 },
-    { id = "ssrf_metadata", pattern = [[(?:169\.254\.169\.254|metadata\.google(?:\.internal)?|metadata\.azure|100\.100\.100\.200)\b]], score = 10 },
-    { id = "ssrf_internal_http", pattern = [[https?\s*://\s*(?:127\.0\.0\.1|0\.0\.0\.0|localhost|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|\[::1\]|::1|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)]], score = 9 },
-    { id = "jndi_lookup", pattern = [[\$\s*\{\s*jndi\s*:]], score = 10 },
-    { id = "jndi_nested_lookup", pattern = [[\$\s*\{\s*\$\s*\{]], score = 8 },
-    { id = "graphql_introspection", pattern = [[__(?:schema|type)\b]], score = 6 }
 }
 
 local function decode_html_entities(value)
@@ -698,6 +718,11 @@ local function add_payload_candidate(candidates, source, label, value, opts)
     }
 end
 
+local function get_owasp_payload_config(site_config)
+    local global_config = get_global_config("owasp_crs", {})
+    return owasp_rules.resolve_config(site_config, global_config)
+end
+
 local function read_request_body_for_inspection(site_config)
     local method = ngx.req.get_method()
     if method ~= "POST" and method ~= "PUT" and method ~= "PATCH" and method ~= "DELETE" then
@@ -955,18 +980,23 @@ local function inspect_request_payload(site_config, uri)
         return false
     end
 
+    local owasp_config = get_owasp_payload_config(site_config)
+
     local candidates = {}
     local candidate_opts = {
         max_candidates = 64,
         max_fields_per_table = 20,
-        max_depth = 4,
+        max_depth = math.max(4, math.min(32, tonumber(site_config.request_body_max_depth or 8) or 8)),
         max_len = tonumber(site_config.request_field_max_len or 4096) or 4096,
         preview_len = 240
     }
 
     add_payload_candidate(candidates, "uri", "path", uri or ngx.var.request_uri or "/", candidate_opts)
 
-    local args = ngx.req.get_uri_args(50)
+    local args, args_err = ngx.req.get_uri_args(200)
+    if args_err == "truncated" then
+        return true, "query_parameter_overflow", 8, "query", "args_overflow", nil
+    end
     if type(args) == "table" then
         for key, value in pairs(args) do
             if #candidates >= candidate_opts.max_candidates then
@@ -1007,21 +1037,28 @@ local function inspect_request_payload(site_config, uri)
         end
     end
 
+    if not owasp_config.enabled then
+        return false
+    end
+
     local findings = {}
     for _, candidate in ipairs(candidates) do
         local text = candidate.normalized
         if text and text ~= "" then
-            for _, signature in ipairs(payload_signatures) do
-                local from = ngx.re.find(text, signature.pattern, "jo")
-                if from then
-                    findings[#findings + 1] = {
-                        id = signature.id,
-                        score = signature.score,
-                        source = candidate.source,
-                        label = candidate.label,
-                        candidate = candidate
-                    }
-                    break
+            for _, signature in ipairs(owasp_rules.PAYLOAD_RULES) do
+                if signature.paranoia <= owasp_config.paranoia_level then
+                    local from = ngx.re.find(text, signature.pattern, "jo")
+                    if from then
+                        findings[#findings + 1] = {
+                            id = signature.id,
+                            tag = signature.tag,
+                            name = signature.name,
+                            score = signature.score,
+                            source = candidate.source,
+                            label = candidate.label,
+                            candidate = candidate
+                        }
+                    end
                 end
             end
         end
@@ -1039,12 +1076,34 @@ local function inspect_request_payload(site_config, uri)
     end)
 
     local total_score = 0
-    for i = 1, math.min(3, #findings) do
-        total_score = total_score + findings[i].score
+    local matched_rules = {}
+    for index = 1, math.min(owasp_config.max_matches, #findings) do
+        local finding = findings[index]
+        total_score = total_score + finding.score
+        matched_rules[#matched_rules + 1] = {
+            id = finding.id,
+            tag = finding.tag,
+            name = finding.name,
+            score = finding.score,
+            source = finding.source,
+            label = finding.label
+        }
+    end
+
+    if total_score < owasp_config.inbound_threshold then
+        return false
     end
 
     local primary = findings[1]
     local inspection_summary = build_payload_inspection_summary(primary.candidate, primary.id, total_score, primary.source, primary.label)
+    if inspection_summary then
+        inspection_summary.matched_rule_id = primary.id
+        inspection_summary.matched_rule_tag = primary.tag
+        inspection_summary.owasp_paranoia_level = owasp_config.paranoia_level
+        inspection_summary.owasp_inbound_score = total_score
+        inspection_summary.matched_rules = matched_rules
+    end
+
     return true, primary.id, total_score, primary.source, primary.label, inspection_summary
 end
 
@@ -1059,6 +1118,13 @@ end
 
 -- 重定向到验证页面
 local function redirect_to_verification(site_config, verification_type, reason, difficulty)
+    if type(verification_type) ~= "string" or verification_type == "" then
+        ngx.status = ngx.HTTP_FORBIDDEN
+        ngx.header.content_type = "text/plain; charset=utf-8"
+        ngx.say("Verification methods are disabled")
+        return ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+
     -- WebSocket握手无法跟随302跳转；遇到需要验证时应直接拒绝，让前端页面先完成验证再建立WS连接
     local headers = ngx.req.get_headers()
     local upgrade = headers["upgrade"] or headers["Upgrade"]
@@ -1071,6 +1137,7 @@ local function redirect_to_verification(site_config, verification_type, reason, 
 
     local request_ctx = get_request_scope_context()
     local scope_mode = is_high_risk_reason(reason) and "path_exact" or "host"
+    local bindings = get_verification_binding_config(site_config)
 
     -- 生成token包含原始URL和验证原因
     local grant_ttl = get_verification_grant_ttl(site_config, verification_type)
@@ -1084,11 +1151,12 @@ local function redirect_to_verification(site_config, verification_type, reason, 
         path = request_ctx.path,
         method = request_ctx.method,
         scope_mode = scope_mode,
+        verification_bindings = bindings,
         grant_ttl = grant_ttl,
         expires = ngx.time() + 3600 -- 1小时内有效
     }
 
-    if verification_type == "slider" and is_high_risk_reason(reason) then
+    if verification_type == "slider" and is_high_risk_reason(reason) and site_config.slider_step_up_on_high_risk ~= false then
         token_data.step_up_verification_type = "pow"
         token_data.step_up_required = true
     end
@@ -1120,10 +1188,25 @@ local function select_verification_method(site_config, reason, client_ip, uri)
     -- 根据异常分数和原因选择验证方式
     local verification_type = "captcha"  -- 默认验证��
     local difficulty = base_difficulty
+    local enabled = {
+        captcha = site_config.captcha_enabled == true,
+        slider = site_config.slider_captcha_enabled == true,
+        pow = site_config.pow_enabled == true
+    }
+
+    local function choose_enabled(...)
+        local candidates = { ... }
+        for _, candidate in ipairs(candidates) do
+            if enabled[candidate] then
+                return candidate
+            end
+        end
+        return nil
+    end
 
     if is_high_risk_reason(reason) or score > 8 then
         -- 高风险请求使用POW
-        verification_type = "pow"
+        verification_type = choose_enabled("pow", "slider", "captcha")
         difficulty = base_difficulty + math.floor(score / 5)
         if is_high_risk_reason(reason) then
             difficulty = math.max(difficulty, base_difficulty + 1)
@@ -1131,20 +1214,9 @@ local function select_verification_method(site_config, reason, client_ip, uri)
         difficulty = math.min(difficulty, max_difficulty)
     elseif score > 4 or reason == "anti_cc" then
         -- 中风险请求使用滑块验证
-        verification_type = "slider"
-    end
-
-        -- 确保所选验证方式已启用
-    if verification_type == "pow" and not site_config.pow_enabled then
-        verification_type = site_config.captcha_enabled and "captcha" or "slider"
-    end
-
-    if verification_type == "slider" and not site_config.slider_captcha_enabled then
-        verification_type = "captcha"
-    end
-
-    if verification_type == "captcha" and not site_config.captcha_enabled and site_config.slider_captcha_enabled then
-        verification_type = "slider"
+        verification_type = choose_enabled("slider", "captcha", "pow")
+    else
+        verification_type = choose_enabled("captcha", "slider", "pow")
     end
 
     return verification_type, difficulty
@@ -1247,6 +1319,8 @@ local function process_waf()
 
     local verified_token = get_verified_token(client_ip, user_agent)
     local request_is_verified = verified_token ~= nil
+    limit_dict:incr("req_rate:" .. client_ip, 1, 0, 60)
+    limit_dict:incr("req_rate5:" .. client_ip, 1, 0, 5)
     
     -- 获取站点配置
     local site_config = get_site_config()
@@ -1264,6 +1338,7 @@ local function process_waf()
     if protocol_violation then
         local total_score = utils.record_anomaly(client_ip, uri, protocol_reason, protocol_score or 6)
         if protocol_score and protocol_score >= 9 then
+            ngx.ctx.auto_blacklist_reason = protocol_reason
             maybe_auto_blacklist(site_config, client_ip, total_score, 1800)
         end
 
@@ -1300,6 +1375,7 @@ local function process_waf()
         local remote_ip = ngx.var.remote_addr or ""
         if remote_ip == "" or not utils.is_trusted_proxy_ip(remote_ip) then
             local total_score = utils.record_anomaly(client_ip, uri, "origin_proxy_bypass", 10)
+            ngx.ctx.auto_blacklist_reason = "origin_proxy_bypass"
             maybe_auto_blacklist(site_config, client_ip, total_score, 3600)
 
             local inspection_summary = normalize_inspection_summary({
@@ -1342,10 +1418,12 @@ local function process_waf()
 
             -- 记录异常
             utils.record_anomaly(client_ip, uri, "honeypot_" .. trap_type, 10)
+            cache_dict:incr("ml:honeypot:" .. client_ip, 1, 0, 3600)
 
             -- 添加到黑名单（短期）
             if site_config.auto_blacklist_enabled then
-                ip_blacklist.add_to_blacklist(client_ip, 21600) -- 6小时
+                ngx.ctx.auto_blacklist_reason = "honeypot_" .. trap_type
+                maybe_auto_blacklist(site_config, client_ip, 100, 21600)
             end
 
             local trigger_reason = "honeypot_" .. trap_type
@@ -1473,6 +1551,89 @@ local function process_waf()
             return
         end
     end
+
+    local bot_intent, bot_intent_confidence, bot_intent_signals =
+        utils.detect_bot_intent(ngx.req.get_headers(), uri, method, client_ip)
+    if bot_intent
+       and (
+            (bot_intent == "credential_stuffing" and site_config.credential_stuffing_detection_enabled ~= false)
+            or (bot_intent == "content_scraping" and site_config.scraping_detection_enabled ~= false)
+            or (bot_intent == "inventory_hoarding" and site_config.inventory_hoarding_detection_enabled ~= false)
+       ) then
+        local reason = bot_intent
+        local score = bot_intent == "content_scraping" and 6 or 8
+        utils.record_anomaly(client_ip, uri, reason, score)
+
+        if request_is_verified and bot_intent_confidence < 0.95 then
+            update_stats(site_config, client_ip, uri, method, false, reason)
+        else
+            if site_config.auto_blacklist_enabled and bot_intent ~= "content_scraping" and bot_intent_confidence >= 0.85 then
+                ngx.ctx.auto_blacklist_reason = reason
+                maybe_auto_blacklist(site_config, client_ip, math.max(100, math.floor(bot_intent_confidence * 100)), tonumber(site_config.auto_blacklist_duration or 1800) or 1800)
+            end
+
+            local verification_type, difficulty = select_verification_method(site_config, reason, client_ip, uri)
+            local inspection_summary = normalize_inspection_summary({
+                trigger_reason = reason,
+                source = "bot_intent",
+                label = reason,
+                matched_signature = reason,
+                score = score,
+                body_preview = "",
+                normalized_preview = table.concat(bot_intent_signals or {}, ", "),
+                encoding_layers = {},
+                encoding_layer_count = 0,
+                obfusc_score = 0,
+                attack_class = "automation",
+                confidence = bot_intent_confidence,
+                sql_hits = 0,
+                xss_hits = 0
+            }, client_ip, uri, method, 403, true)
+            if inspection_summary then
+                persist_inspection_summary(inspection_summary)
+            end
+
+            log_request(site_config, client_ip, uri, 403, true, reason)
+            update_stats(site_config, client_ip, uri, method, true, reason)
+            redirect_to_verification(site_config, verification_type, reason, difficulty)
+            return
+        end
+    end
+
+    if ml_inference and site_config.ml_bot_classification_enabled then
+        local headers = ngx.req.get_headers()
+        local args = ngx.req.get_uri_args()
+        local fingerprint = utils.calculate_request_fingerprint(headers, args, method, uri)
+        local feature_vec = ml_inference.extract_features(client_ip, uri, method, args, headers)
+        local is_attack, prob = ml_inference.predict_with_cache(client_ip, fingerprint, feature_vec)
+        local confidence = tonumber(prob or 0) or 0
+        local challenge_threshold = tonumber(site_config.ml_bot_challenge_threshold or 0.75) or 0.75
+        local ban_threshold = tonumber(site_config.ml_bot_ban_threshold or 0.92) or 0.92
+        local reason = "ml_bot_classification"
+
+        if is_attack == true and confidence >= challenge_threshold then
+            ml_inference.collect_training_sample(client_ip, feature_vec, "attack", reason)
+            if site_config.llm_audit_enabled ~= false then
+                llm_auditor.queue_for_review(
+                    client_ip,
+                    uri,
+                    method,
+                    headers,
+                    "",
+                    reason,
+                    confidence,
+                    {
+                        ban_candidate = site_config.auto_blacklist_enabled == true and confidence >= ban_threshold and site_config.ml_bot_autoban_enabled == true,
+                        suggested_ban_ttl = tonumber(site_config.auto_blacklist_duration or 3600) or 3600,
+                        current_request_disposition = "allow_current_request_review_future",
+                        source = "ml_bot_classification"
+                    }
+                )
+            end
+        elseif is_attack == false then
+            ml_inference.collect_training_sample(client_ip, feature_vec, "benign", "ml_benign")
+        end
+    end
     if site_config.ddos_protection_enabled and site_config.slow_ddos_protection_enabled ~= false then
         local is_slow, slow_reason, count, limit = ddos_protection.check_slow_ddos(client_ip)
         if is_slow then
@@ -1480,6 +1641,7 @@ local function process_waf()
 
             local score = (slow_reason == "conn_hard") and 10 or 7
             local total_score = utils.record_anomaly(client_ip, uri, reason, score)
+            ngx.ctx.auto_blacklist_reason = reason
             local blacklisted = maybe_auto_blacklist(site_config, client_ip, total_score, (slow_reason == "conn_hard") and 3600 or nil)
 
             -- 连接风暴/系统高压：优先直接丢弃连接，避免验证页把资源拖垮
@@ -1575,6 +1737,7 @@ local function process_waf()
         if is_limited then
             -- 记录异常
             local total_score = utils.record_anomaly(client_ip, uri, "global_rate_limit", 3)
+            ngx.ctx.auto_blacklist_reason = "global_rate_limit"
             maybe_auto_blacklist(site_config, client_ip, total_score)
 
             local base_limit = tonumber(site_config.global_rate_limit_count or 60) or 60
@@ -1712,7 +1875,8 @@ local function process_waf()
             -- 超出阈值过多：直接丢弃连接并可选自动封禁
             if (not is_global_pressure) and count and limit and count > (limit * 3) then
                 if site_config.auto_blacklist_enabled then
-                    ip_blacklist.add_to_blacklist(client_ip, 1800) -- 30分钟
+                    ngx.ctx.auto_blacklist_reason = ddos_reason
+                    maybe_auto_blacklist(site_config, client_ip, 100, 1800)
                 end
 
                 local inspection_summary = normalize_inspection_summary({
@@ -1946,6 +2110,7 @@ local function process_waf()
     if payload_detected then
         local reason = "payload_" .. tostring(payload_signature or "malicious_input")
         local total_score = utils.record_anomaly(client_ip, uri, reason, payload_score or 8)
+        ngx.ctx.auto_blacklist_reason = reason
         local blacklisted = maybe_auto_blacklist(site_config, client_ip, total_score, (payload_score or 0) >= 10 and 3600 or nil)
         local should_drop = blacklisted or total_score >= 30
 
@@ -1984,6 +2149,7 @@ local function process_waf()
         if is_random_attack then
             -- 记录异常
             local total_score = utils.record_anomaly(client_ip, uri, "random_attack_" .. attack_type, 7)
+            ngx.ctx.auto_blacklist_reason = "random_attack"
             maybe_auto_blacklist(site_config, client_ip, total_score)
 
             if total_score >= 40 then
@@ -2135,6 +2301,7 @@ local function process_waf()
         if is_automation then
             -- 记录异常
             local total_score = utils.record_anomaly(client_ip, uri, "automation_tool", 6)
+            ngx.ctx.auto_blacklist_reason = "automation_tool"
             maybe_auto_blacklist(site_config, client_ip, total_score)
 
             if total_score >= 35 then
@@ -2205,6 +2372,7 @@ local function process_waf()
             -- 记录异常
             local score = (cc_reason == "burst") and 8 or 6
             local total_score = utils.record_anomaly(client_ip, uri, "cc_attack_" .. (cc_reason or "unknown"), score)
+            ngx.ctx.auto_blacklist_reason = "anti_cc_" .. tostring(cc_reason or "unknown")
             local blacklisted = maybe_auto_blacklist(site_config, client_ip, total_score, (cc_reason == "burst") and 1800 or nil)
 
             -- 爆发/重复违规：直接丢弃连接
@@ -2275,6 +2443,7 @@ local function process_waf()
         if is_anomalous then
             -- 记录异常
             local total_score = utils.record_anomaly(client_ip, uri, "anomalous_traffic", score)
+            ngx.ctx.auto_blacklist_reason = "traffic_analysis"
             maybe_auto_blacklist(site_config, client_ip, total_score)
 
             if total_score >= 45 then
@@ -2350,6 +2519,7 @@ local function process_waf()
         if is_anomalous then
             -- 记录异常
             local total_score = utils.record_anomaly(client_ip, uri, "sampled_anomaly", distance)
+            ngx.ctx.auto_blacklist_reason = "sampled_anomaly"
             maybe_auto_blacklist(site_config, client_ip, total_score)
 
             if distance > 15 then

@@ -2,13 +2,16 @@ const Redis = require('ioredis');
 
 class ClusterManager {
   constructor() {
+    const envRole = process.env.NODE_ROLE || 'secondary';
     this.redisClient = null;
     this.pubClient = null;
     this.subClient = null;
     this.nodeId = process.env.NODE_ID || `node-${Date.now()}`;
-    this.nodeRole = process.env.NODE_ROLE || 'worker';
+    this.nodeRole = envRole === 'worker' ? 'secondary' : envRole;
     this.heartbeatInterval = parseInt(process.env.HEARTBEAT_INTERVAL || '30') * 1000;
     this.nodeTimeout = 90; // seconds
+    this.heartbeatTimer = null;
+    this.initialized = false;
   }
 
   _createRedis() {
@@ -25,12 +28,17 @@ class ClusterManager {
   }
 
   async initialize() {
+    if (this.initialized) {
+      return;
+    }
+
     this.redisClient = this._createRedis();
     this.pubClient   = this._createRedis();
     this.subClient   = this._createRedis();
 
     await this.registerSelf();
     this.startHeartbeat();
+    this.initialized = true;
 
     console.log(`[Cluster] Node ${this.nodeId} initialized as ${this.nodeRole}`);
   }
@@ -41,7 +49,7 @@ class ClusterManager {
       node_id:       nodeId,
       hostname:      metadata.hostname || 'unknown',
       ip:            metadata.ip || 'unknown',
-      role:          metadata.role || 'worker',
+      role:          metadata.role === 'worker' ? 'secondary' : (metadata.role || 'secondary'),
       status:        'online',
       last_seen:     Date.now(),
       version:       metadata.version || '1.0.0',
@@ -93,11 +101,22 @@ class ClusterManager {
   }
 
   startHeartbeat() {
-    setInterval(async () => {
+    if (this.heartbeatTimer) {
+      return;
+    }
+
+    this.heartbeatTimer = setInterval(async () => {
       await this.updateHeartbeat(this.nodeId);
     }, this.heartbeatInterval);
 
     console.log(`[Cluster] Heartbeat started (interval: ${this.heartbeatInterval}ms)`);
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   async getClusterStatus() {
@@ -196,13 +215,31 @@ class ClusterManager {
   }
 
   async shutdown() {
+    if (!this.initialized) {
+      this.stopHeartbeat();
+      return;
+    }
+
     console.log(`[Cluster] Shutting down node ${this.nodeId}`);
     const nodeKey = `cluster:nodes:${this.nodeId}`;
-    await this.redisClient.hset(nodeKey, 'status', 'offline');
+    if (this.redisClient) {
+      try {
+        await this.redisClient.hset(nodeKey, 'status', 'offline');
+      } catch (error) {
+        console.warn(`[Cluster] Failed to mark node offline during shutdown: ${error.message}`);
+      }
+    }
 
-    if (this.redisClient) this.redisClient.quit();
-    if (this.pubClient)   this.pubClient.quit();
-    if (this.subClient)   this.subClient.quit();
+    this.stopHeartbeat();
+
+    if (this.redisClient) await this.redisClient.quit().catch(() => {});
+    if (this.pubClient)   await this.pubClient.quit().catch(() => {});
+    if (this.subClient)   await this.subClient.quit().catch(() => {});
+
+    this.redisClient = null;
+    this.pubClient = null;
+    this.subClient = null;
+    this.initialized = false;
   }
 
   // ── ML Model Synchronisation ──────────────────────────────────────────

@@ -6,26 +6,54 @@ class HeartbeatWorker {
     this.checkInterval = 30000; // 30 seconds
     this.nodeTimeout = 90; // seconds
     this.cleanupInterval = 300000; // 5 minutes
+    this.healthCheckTimer = null;
+    this.cleanupTimer = null;
+    this.initialWarmupTimer = null;
+    this.started = false;
   }
 
   start() {
+    if (this.started) {
+      return;
+    }
+
+    this.started = true;
     console.log('[HeartbeatWorker] Starting health monitoring...');
 
     // Periodic health check
-    setInterval(() => {
+    this.healthCheckTimer = setInterval(() => {
       this.checkNodeHealth();
     }, this.checkInterval);
 
     // Periodic cleanup of stale nodes
-    setInterval(() => {
+    this.cleanupTimer = setInterval(() => {
       this.cleanupStaleNodes();
     }, this.cleanupInterval);
 
     // Initial checks
-    setTimeout(() => {
+    this.initialWarmupTimer = setTimeout(() => {
       this.checkNodeHealth();
       this.cleanupStaleNodes();
     }, 5000);
+  }
+
+  stop() {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+
+    if (this.initialWarmupTimer) {
+      clearTimeout(this.initialWarmupTimer);
+      this.initialWarmupTimer = null;
+    }
+
+    this.started = false;
   }
 
   async checkNodeHealth() {

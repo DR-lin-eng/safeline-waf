@@ -2,7 +2,11 @@
 /**
  * LLM Audit API Routes — mounted at /api/llm/*
  */
-const { encryptApiKey, decryptApiKey } = require('./llm_worker');
+const {
+  decryptApiKey,
+  normalizeLlmConfigDirect,
+  sanitizeLlmConfigForClientDirect,
+} = require('./llm_worker');
 
 module.exports = function mountLlmRoutes(router, redis, jwtSecret) {
 
@@ -18,13 +22,9 @@ module.exports = function mountLlmRoutes(router, redis, jwtSecret) {
     try {
       const raw = await redis.get('llm:config');
       if (!raw) return ok(res, null);
-      const cfg = JSON.parse(raw);
-      // Never expose the actual key
-      if (cfg.api_key_enc) {
-        cfg.api_key_masked = '••••••••' + cfg.api_key_enc.slice(-4);
-        delete cfg.api_key_enc;
-      }
-      ok(res, cfg);
+      const parsed = JSON.parse(raw);
+      const cfg = normalizeLlmConfigDirect(parsed, parsed, jwtSecret);
+      ok(res, sanitizeLlmConfigForClientDirect(cfg));
     } catch (e) {
       err(res, 500, e.message);
     }
@@ -36,47 +36,16 @@ module.exports = function mountLlmRoutes(router, redis, jwtSecret) {
   //              verdict_cache_ttl_s, timeout_ms, audit_triggers[]
   router.put('/llm/config', async (req, res) => {
     try {
-      const {
-        provider, api_endpoint, model, api_key,
-        enabled, autoban_min_confidence, batch_size,
-        call_delay_ms, verdict_cache_ttl_s, timeout_ms,
-        audit_triggers,
-      } = req.body;
-
-      // Load existing config to preserve encrypted key if no new key provided
       const existingRaw = await redis.get('llm:config');
-      const existing    = existingRaw ? JSON.parse(existingRaw) : {};
-
-      let api_key_enc = existing.api_key_enc || '';
-      if (api_key && api_key.trim() && !api_key.startsWith('••')) {
-        api_key_enc = encryptApiKey(api_key.trim(), jwtSecret);
-      }
-
-      const cfg = {
-        provider:               provider    || existing.provider    || 'openai',
-        api_endpoint:           api_endpoint || existing.api_endpoint || 'https://api.openai.com/v1',
-        model:                  model       || existing.model       || 'gpt-4o-mini',
-        api_key_enc,
-        enabled:                enabled !== undefined ? !!enabled : !!existing.enabled,
-        autoban_min_confidence: parseFloat(autoban_min_confidence ?? existing.autoban_min_confidence ?? 0.75),
-        batch_size:             parseInt(batch_size ?? existing.batch_size ?? 3, 10),
-        call_delay_ms:          parseInt(call_delay_ms ?? existing.call_delay_ms ?? 200, 10),
-        verdict_cache_ttl_s:    parseInt(verdict_cache_ttl_s ?? existing.verdict_cache_ttl_s ?? 600, 10),
-        timeout_ms:             parseInt(timeout_ms ?? existing.timeout_ms ?? 15000, 10),
-        audit_triggers:         Array.isArray(audit_triggers) ? audit_triggers
-                                  : (existing.audit_triggers || ['ml_gray_zone','payload_suspicious','high_block_rate']),
-        updated_at:             Date.now(),
-      };
+      const existing = existingRaw ? JSON.parse(existingRaw) : {};
+      const cfg = normalizeLlmConfigDirect(req.body || {}, existing, jwtSecret);
 
       await redis.set('llm:config', JSON.stringify(cfg));
 
       // Reflect enabled state to shared dict key for Lua workers
       await redis.set('llm:enabled', cfg.enabled ? 'true' : 'false');
 
-      // Mask key before returning
-      const out = { ...cfg, api_key_masked: '••••••••' + api_key_enc.slice(-4) };
-      delete out.api_key_enc;
-      ok(res, out);
+      ok(res, sanitizeLlmConfigForClientDirect(cfg));
     } catch (e) {
       err(res, 500, e.message);
     }
@@ -205,13 +174,20 @@ module.exports = function mountLlmRoutes(router, redis, jwtSecret) {
   router.post('/llm/test', async (_req, res) => {
     try {
       const raw = await redis.get('llm:config');
-      if (!raw) return err(res, 404, 'LLM not configured');
-      const cfg = JSON.parse(raw);
-      if (cfg.api_key_enc) {
-        try { cfg.api_key = decryptApiKey(cfg.api_key_enc, jwtSecret); }
-        catch (_) { cfg.api_key = cfg.api_key_enc; }
+      const existing = raw ? JSON.parse(raw) : {};
+      const override = (_req && _req.body && typeof _req.body === 'object') ? _req.body : {};
+      const cfg = normalizeLlmConfigDirect(override, existing, jwtSecret);
+      cfg.providers = cfg.providers.map((provider) => {
+        const resolved = { ...provider };
+        if (resolved.api_key_enc) {
+          try { resolved.api_key = decryptApiKey(resolved.api_key_enc, jwtSecret); }
+          catch (_) { resolved.api_key = resolved.api_key_enc; }
+        }
+        return resolved;
+      });
+      if (!cfg.providers.some((provider) => provider.enabled !== false && provider.api_key)) {
+        return err(res, 400, 'API key not set');
       }
-      if (!cfg.api_key) return err(res, 400, 'API key not set');
 
       const { callLLMDirect, parseVerdictDirect } = require('./llm_worker');
       const testEntry = {
@@ -220,9 +196,15 @@ module.exports = function mountLlmRoutes(router, redis, jwtSecret) {
         body_preview: '', trigger_reason: 'connectivity_test', ml_score: 0.8,
       };
 
-      const text    = await callLLMDirect(cfg, testEntry);
+      const result  = await callLLMDirect(cfg, testEntry);
+      const text    = result && result.text ? result.text : result;
       const verdict = parseVerdictDirect(text);
-      ok(res, { connected: true, sample_verdict: verdict });
+      ok(res, {
+        connected: true,
+        sample_verdict: verdict,
+        provider_id: result && result.provider ? result.provider.id : null,
+        provider_name: result && result.provider ? result.provider.name : null,
+      });
     } catch (e) {
       ok(res, { connected: false, error: e.message });
     }

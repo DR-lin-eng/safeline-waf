@@ -317,6 +317,16 @@ export default {
           enabled: true,
           rate: 0.01,
           anomaly_threshold: 5.0
+        },
+        adaptive_protection: {
+          hard_drop_on_overload: true,
+          verified_scrubbing_rps: 20
+        },
+        owasp_crs: {
+          enabled: true,
+          paranoia_level: 1,
+          inbound_threshold: 5,
+          max_matches: 8
         }
       }
     };
@@ -441,6 +451,12 @@ export default {
           const sampling = rootConfig.sampling && typeof rootConfig.sampling === 'object'
             ? rootConfig.sampling
             : {};
+          const adaptiveProtection = rootConfig.adaptive_protection && typeof rootConfig.adaptive_protection === 'object'
+            ? rootConfig.adaptive_protection
+            : {};
+          const owaspCrs = rootConfig.owasp_crs && typeof rootConfig.owasp_crs === 'object'
+            ? rootConfig.owasp_crs
+            : {};
           this.globalDefaults.anti_bypass = {
             ...this.globalDefaults.anti_bypass,
             ...antiBypass
@@ -452,6 +468,14 @@ export default {
           this.globalDefaults.sampling = {
             ...this.globalDefaults.sampling,
             ...sampling
+          };
+          this.globalDefaults.adaptive_protection = {
+            ...this.globalDefaults.adaptive_protection,
+            ...adaptiveProtection
+          };
+          this.globalDefaults.owasp_crs = {
+            ...this.globalDefaults.owasp_crs,
+            ...owaspCrs
           };
         }
       } catch (_error) {
@@ -576,8 +600,11 @@ export default {
       const antiBypassDefaults = (this.globalDefaults && this.globalDefaults.anti_bypass) || {};
       const honeypotDefaults = (this.globalDefaults && this.globalDefaults.honeypot_settings) || {};
       const samplingDefaults = (this.globalDefaults && this.globalDefaults.sampling) || {};
+      const adaptiveDefaults = (this.globalDefaults && this.globalDefaults.adaptive_protection) || {};
+      const owaspDefaults = (this.globalDefaults && this.globalDefaults.owasp_crs) || {};
       const defaultSamplingRate = Number(samplingDefaults.rate);
       const defaultAnomalyThreshold = Number(samplingDefaults.anomaly_threshold);
+      const defaultVerifiedScrubbingRps = Number(adaptiveDefaults.verified_scrubbing_rps);
       return {
         domain: '',
         backend_server: 'http://localhost:8080',
@@ -591,7 +618,11 @@ export default {
           global_rate_limit_enabled: true,
           global_rate_limit_count: 60,
           global_rate_limit_window: 60,
+          credential_stuffing_detection_enabled: true,
+          scraping_detection_enabled: true,
+          inventory_hoarding_detection_enabled: true,
           ddos_protection_enabled: true,
+          slow_ddos_protection_enabled: true,
           random_attack_protection_enabled: true,
           anti_cc_enabled: true,
           automation_detection_enabled: true,
@@ -604,11 +635,30 @@ export default {
           prevent_browser_f12: false,
           honeypot_enabled: honeypotDefaults.enabled !== false,
           auto_blacklist_enabled: true,
+          auto_blacklist_score_threshold: 20,
+          auto_blacklist_duration: 900,
           request_logging_enabled: true,
+          llm_audit_enabled: true,
+          ml_bot_classification_enabled: false,
+          ml_bot_challenge_threshold: 0.75,
+          ml_bot_ban_threshold: 0.92,
+          ml_bot_autoban_enabled: false,
+          owasp_crs_enabled: owaspDefaults.enabled !== false,
+          owasp_paranoia_level: Number(owaspDefaults.paranoia_level || 1),
+          owasp_inbound_threshold: Number(owaspDefaults.inbound_threshold || 5),
+          owasp_max_matches: Number(owaspDefaults.max_matches || 8),
           request_content_inspection_enabled: true,
           request_body_max_bytes: 32768,
           request_field_max_len: 4096,
+          request_body_max_depth: 32,
+          graphql_max_depth: 12,
+          max_uri_length: 8192,
+          max_header_count: 96,
+          max_forwarded_hops: 16,
           ddos_reverify_window: 120,
+          stats_sample_rate: 0.01,
+          global_hard_drop_enabled: adaptiveDefaults.hard_drop_on_overload === true,
+          verified_scrubbing_rps: Number.isFinite(defaultVerifiedScrubbingRps) ? defaultVerifiedScrubbingRps : 20,
           origin_proxy_only_enabled: antiBypassDefaults.origin_proxy_only_default === true
         },
         verification_methods: {
@@ -685,6 +735,7 @@ export default {
             ...defaults.verification_methods.verification_methods,
             ...(this.currentSite.verification_methods.verification_methods || {})
           };
+          this.currentSite.verification_methods.verification_methods.cookie = true;
 
           this.ensureBackendPortFollow();
           this.ensureTlsConfig();
@@ -759,6 +810,21 @@ export default {
       }
     },
     validateAdvancedSettings() {
+      const statsSampleRate = Number(this.currentSite.protection.stats_sample_rate);
+      const autoBlacklistScoreThreshold = Number(this.currentSite.protection.auto_blacklist_score_threshold);
+      const autoBlacklistDuration = Number(this.currentSite.protection.auto_blacklist_duration);
+      const requestBodyMaxDepth = Number(this.currentSite.protection.request_body_max_depth);
+      const graphqlMaxDepth = Number(this.currentSite.protection.graphql_max_depth);
+      const maxUriLength = Number(this.currentSite.protection.max_uri_length);
+      const maxHeaderCount = Number(this.currentSite.protection.max_header_count);
+      const maxForwardedHops = Number(this.currentSite.protection.max_forwarded_hops);
+      const verifiedScrubbingRps = Number(this.currentSite.protection.verified_scrubbing_rps);
+      const mlBotChallengeThreshold = Number(this.currentSite.protection.ml_bot_challenge_threshold);
+      const mlBotBanThreshold = Number(this.currentSite.protection.ml_bot_ban_threshold);
+      const owaspParanoiaLevel = Number(this.currentSite.protection.owasp_paranoia_level);
+      const owaspInboundThreshold = Number(this.currentSite.protection.owasp_inbound_threshold);
+      const owaspMaxMatches = Number(this.currentSite.protection.owasp_max_matches);
+
       if (this.currentSite.protection.request_content_inspection_enabled) {
         const requestBodyMaxBytes = Number(this.currentSite.protection.request_body_max_bytes);
         const requestFieldMaxLen = Number(this.currentSite.protection.request_field_max_len);
@@ -775,6 +841,16 @@ export default {
 
         if (requestFieldMaxLen > requestBodyMaxBytes) {
           this.siteFormError = '单字段最大长度不能超过请求体扫描上限。';
+          return false;
+        }
+
+        if (!Number.isInteger(requestBodyMaxDepth) || requestBodyMaxDepth < 1 || requestBodyMaxDepth > 128) {
+          this.siteFormError = '请求体结构深度必须介于 1 到 128 之间。';
+          return false;
+        }
+
+        if (!Number.isInteger(graphqlMaxDepth) || graphqlMaxDepth < 1 || graphqlMaxDepth > 64) {
+          this.siteFormError = 'GraphQL 深度限制必须介于 1 到 64 之间。';
           return false;
         }
       }
@@ -810,8 +886,91 @@ export default {
         return false;
       }
 
+      if (!Number.isFinite(statsSampleRate) || statsSampleRate < 0 || statsSampleRate > 1) {
+        this.siteFormError = '统计采样率必须介于 0 到 1 之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(autoBlacklistScoreThreshold) || autoBlacklistScoreThreshold < 1 || autoBlacklistScoreThreshold > 200) {
+        this.siteFormError = '自动黑名单触发分数必须介于 1 到 200 之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(autoBlacklistDuration) || autoBlacklistDuration < 60 || autoBlacklistDuration > 604800) {
+        this.siteFormError = '自动黑名单时长必须介于 60 到 604800 秒之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(maxUriLength) || maxUriLength < 256 || maxUriLength > 32768) {
+        this.siteFormError = 'URI 最大长度必须介于 256 到 32768 之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(maxHeaderCount) || maxHeaderCount < 32 || maxHeaderCount > 256) {
+        this.siteFormError = 'Header 数量限制必须介于 32 到 256 之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(maxForwardedHops) || maxForwardedHops < 4 || maxForwardedHops > 64) {
+        this.siteFormError = 'Forwarded/XFF 跳数限制必须介于 4 到 64 之间。';
+        return false;
+      }
+
+      if (!Number.isInteger(verifiedScrubbingRps) || verifiedScrubbingRps < 1 || verifiedScrubbingRps > 1000) {
+        this.siteFormError = '已验证用户清洗速率必须介于 1 到 1000 之间。';
+        return false;
+      }
+
+      if (this.currentSite.protection.ml_bot_classification_enabled) {
+        if (!Number.isFinite(mlBotChallengeThreshold) || mlBotChallengeThreshold < 0.5 || mlBotChallengeThreshold > 1) {
+          this.siteFormError = 'ML 审查阈值必须介于 0.5 到 1 之间。';
+          return false;
+        }
+
+        if (!Number.isFinite(mlBotBanThreshold) || mlBotBanThreshold < 0.5 || mlBotBanThreshold > 1) {
+          this.siteFormError = 'ML 封禁建议阈值必须介于 0.5 到 1 之间。';
+          return false;
+        }
+
+        if (mlBotBanThreshold < mlBotChallengeThreshold) {
+          this.siteFormError = 'ML 封禁建议阈值不能低于 ML 审查阈值。';
+          return false;
+        }
+      }
+
+      if (this.currentSite.protection.request_content_inspection_enabled && this.currentSite.protection.owasp_crs_enabled) {
+        if (!Number.isInteger(owaspParanoiaLevel) || owaspParanoiaLevel < 1 || owaspParanoiaLevel > 4) {
+          this.siteFormError = 'OWASP Paranoia Level 必须介于 1 到 4 之间。';
+          return false;
+        }
+
+        if (!Number.isInteger(owaspInboundThreshold) || owaspInboundThreshold < 1 || owaspInboundThreshold > 100) {
+          this.siteFormError = 'OWASP 入站阈值必须介于 1 到 100 之间。';
+          return false;
+        }
+
+        if (!Number.isInteger(owaspMaxMatches) || owaspMaxMatches < 1 || owaspMaxMatches > 32) {
+          this.siteFormError = 'OWASP 最大命中数必须介于 1 到 32 之间。';
+          return false;
+        }
+      }
+
       this.currentSite.protection.ddos_reverify_window = ddosReverifyWindow;
       this.currentSite.protection.log_sample_rate = logSampleRate;
+      this.currentSite.protection.stats_sample_rate = statsSampleRate;
+      this.currentSite.protection.auto_blacklist_score_threshold = autoBlacklistScoreThreshold;
+      this.currentSite.protection.auto_blacklist_duration = autoBlacklistDuration;
+      this.currentSite.protection.request_body_max_depth = requestBodyMaxDepth;
+      this.currentSite.protection.graphql_max_depth = graphqlMaxDepth;
+      this.currentSite.protection.max_uri_length = maxUriLength;
+      this.currentSite.protection.max_header_count = maxHeaderCount;
+      this.currentSite.protection.max_forwarded_hops = maxForwardedHops;
+      this.currentSite.protection.verified_scrubbing_rps = verifiedScrubbingRps;
+      this.currentSite.protection.ml_bot_challenge_threshold = mlBotChallengeThreshold;
+      this.currentSite.protection.ml_bot_ban_threshold = mlBotBanThreshold;
+      this.currentSite.protection.owasp_paranoia_level = owaspParanoiaLevel;
+      this.currentSite.protection.owasp_inbound_threshold = owaspInboundThreshold;
+      this.currentSite.protection.owasp_max_matches = owaspMaxMatches;
       this.currentSite.verification_methods.slider_verification_ttl = sliderVerificationTtl;
       this.currentSite.verification_methods.captcha_verification_ttl = captchaVerificationTtl;
       this.currentSite.verification_methods.pow_verification_ttl = powVerificationTtl;

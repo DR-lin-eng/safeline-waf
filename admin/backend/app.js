@@ -758,8 +758,12 @@ function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig, globalConfi
   const protectionInput = isObject(siteConfig && siteConfig.protection) ? siteConfig.protection : {};
   const samplingConfig = normalizeSamplingConfig(globalConfig);
   const honeypotConfig = normalizeHoneypotSettingsConfig(globalConfig);
+  const adaptiveConfig = isObject(globalConfig && globalConfig.adaptive_protection)
+    ? globalConfig.adaptive_protection
+    : {};
   const samplingRate = normalizeFloat(protectionInput.sampling_rate, samplingConfig.rate, 0, 1);
   const logSampleRate = normalizeFloat(protectionInput.log_sample_rate, samplingRate, 0, 1);
+  const statsSampleRate = normalizeFloat(protectionInput.stats_sample_rate, samplingRate, 0, 1);
 
   return {
     ...protectionInput,
@@ -769,11 +773,36 @@ function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig, globalConfi
     ),
     sampling_rate: samplingRate,
     log_sample_rate: logSampleRate,
+    stats_sample_rate: statsSampleRate,
     anomaly_threshold: normalizeFloat(
       protectionInput.anomaly_threshold,
       samplingConfig.anomaly_threshold,
       0.1,
       100
+    ),
+    global_rate_limit_count: normalizeInteger(
+      protectionInput.global_rate_limit_count,
+      60,
+      1,
+      100000
+    ),
+    global_rate_limit_window: normalizeInteger(
+      protectionInput.global_rate_limit_window,
+      60,
+      1,
+      3600
+    ),
+    credential_stuffing_detection_enabled: toBooleanOrDefault(
+      protectionInput.credential_stuffing_detection_enabled,
+      true
+    ),
+    scraping_detection_enabled: toBooleanOrDefault(
+      protectionInput.scraping_detection_enabled,
+      true
+    ),
+    inventory_hoarding_detection_enabled: toBooleanOrDefault(
+      protectionInput.inventory_hoarding_detection_enabled,
+      true
     ),
     honeypot_enabled: toBooleanOrDefault(
       protectionInput.honeypot_enabled,
@@ -784,7 +813,114 @@ function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig, globalConfi
         .map((item) => String(item || '').trim())
         .filter(Boolean)
     )),
+    llm_audit_enabled: toBooleanOrDefault(protectionInput.llm_audit_enabled, true),
+    ml_bot_classification_enabled: toBooleanOrDefault(
+      protectionInput.ml_bot_classification_enabled,
+      false
+    ),
+    ml_bot_challenge_threshold: normalizeFloat(
+      protectionInput.ml_bot_challenge_threshold,
+      0.75,
+      0.5,
+      1
+    ),
+    ml_bot_ban_threshold: normalizeFloat(
+      protectionInput.ml_bot_ban_threshold,
+      0.92,
+      0.5,
+      1
+    ),
+    ml_bot_autoban_enabled: toBooleanOrDefault(
+      protectionInput.ml_bot_autoban_enabled,
+      false
+    ),
+    owasp_crs_enabled: toBooleanOrDefault(
+      protectionInput.owasp_crs_enabled,
+      !isObject(globalConfig.owasp_crs) || globalConfig.owasp_crs.enabled !== false
+    ),
+    owasp_paranoia_level: normalizeInteger(
+      protectionInput.owasp_paranoia_level,
+      isObject(globalConfig.owasp_crs) ? globalConfig.owasp_crs.paranoia_level : 1,
+      1,
+      4
+    ),
+    owasp_inbound_threshold: normalizeInteger(
+      protectionInput.owasp_inbound_threshold,
+      isObject(globalConfig.owasp_crs) ? globalConfig.owasp_crs.inbound_threshold : 5,
+      1,
+      100
+    ),
+    owasp_max_matches: normalizeInteger(
+      protectionInput.owasp_max_matches,
+      isObject(globalConfig.owasp_crs) ? globalConfig.owasp_crs.max_matches : 8,
+      1,
+      32
+    ),
+    auto_blacklist_score_threshold: normalizeInteger(
+      protectionInput.auto_blacklist_score_threshold,
+      20,
+      1,
+      200
+    ),
+    auto_blacklist_duration: normalizeInteger(
+      protectionInput.auto_blacklist_duration,
+      900,
+      60,
+      604800
+    ),
+    request_body_max_bytes: normalizeInteger(
+      protectionInput.request_body_max_bytes,
+      32768,
+      1024,
+      2097152
+    ),
+    request_field_max_len: normalizeInteger(
+      protectionInput.request_field_max_len,
+      4096,
+      256,
+      262144
+    ),
+    request_body_max_depth: normalizeInteger(
+      protectionInput.request_body_max_depth,
+      32,
+      1,
+      128
+    ),
+    graphql_max_depth: normalizeInteger(
+      protectionInput.graphql_max_depth,
+      12,
+      1,
+      64
+    ),
+    max_uri_length: normalizeInteger(
+      protectionInput.max_uri_length,
+      8192,
+      256,
+      32768
+    ),
+    max_header_count: normalizeInteger(
+      protectionInput.max_header_count,
+      96,
+      32,
+      256
+    ),
+    max_forwarded_hops: normalizeInteger(
+      protectionInput.max_forwarded_hops,
+      16,
+      4,
+      64
+    ),
     ddos_reverify_window: normalizeInteger(protectionInput.ddos_reverify_window, 120, 10, 3600),
+    global_hard_drop_enabled: toBooleanOrDefault(
+      protectionInput.global_hard_drop_enabled,
+      adaptiveConfig.hard_drop_on_overload === true
+    ),
+    verified_scrubbing_rps: normalizeInteger(
+      protectionInput.verified_scrubbing_rps,
+      adaptiveConfig.verified_scrubbing_rps || 20,
+      1,
+      1000
+    ),
     origin_proxy_only_enabled: toBooleanOrDefault(
       protectionInput.origin_proxy_only_enabled,
       antiBypassConfig.origin_proxy_only_default
@@ -832,7 +968,7 @@ function normalizeSiteVerificationMethods(siteConfig, antiBypassConfig) {
     verification_methods: {
       ip_address: toBooleanOrDefault(verificationBindings.ip_address, true),
       user_agent: toBooleanOrDefault(verificationBindings.user_agent, true),
-      cookie: toBooleanOrDefault(verificationBindings.cookie, true)
+      cookie: true
     }
   };
 }
@@ -1352,8 +1488,8 @@ function normalizeClusterConfig(config) {
   const nodesInput = Array.isArray(cluster.nodes) ? cluster.nodes : [];
   const syncInput = isObject(cluster.sync) ? cluster.sync : {};
 
-  const nodeRole = normalizeNodeRole(cluster.node_role || cluster.role || 'primary');
-  const nodeId = normalizeNodeId(cluster.node_id || process.env.SAFELINE_NODE_ID || 'node-1');
+  const nodeRole = normalizeNodeRole(cluster.node_role || cluster.role || process.env.NODE_ROLE || 'secondary');
+  const nodeId = normalizeNodeId(cluster.node_id || process.env.NODE_ID || 'node-1');
   const enabled = cluster.enabled === true;
 
   const seen = new Set();
@@ -1830,6 +1966,54 @@ async function syncConfigFromPrimary(config) {
 }
 
 let clusterConfigSyncTimer = null;
+let clusterRuntimeState = {
+  enabled: false,
+  nodeId: null,
+  nodeRole: null
+};
+
+async function reconcileClusterRuntime(config) {
+  const cluster = normalizeClusterConfig(config || {});
+  const nextEnabled = cluster.enabled === true;
+  const nextNodeId = cluster.node_id;
+  const nextNodeRole = cluster.node_role;
+  const runtimeChanged = (
+    clusterRuntimeState.enabled !== nextEnabled
+    || clusterRuntimeState.nodeId !== nextNodeId
+    || clusterRuntimeState.nodeRole !== nextNodeRole
+  );
+
+  if (!nextEnabled) {
+    heartbeatWorker.stop();
+    await clusterManager.shutdown();
+    clusterRuntimeState = {
+      enabled: false,
+      nodeId: nextNodeId,
+      nodeRole: nextNodeRole
+    };
+    return cluster;
+  }
+
+  if (runtimeChanged && clusterManager.initialized) {
+    heartbeatWorker.stop();
+    await clusterManager.shutdown();
+  }
+
+  clusterManager.nodeId = nextNodeId;
+  clusterManager.nodeRole = nextNodeRole;
+  clusterManager.heartbeatInterval = parseInt(process.env.HEARTBEAT_INTERVAL || '30', 10) * 1000;
+
+  await clusterManager.initialize();
+  heartbeatWorker.start();
+
+  clusterRuntimeState = {
+    enabled: true,
+    nodeId: nextNodeId,
+    nodeRole: nextNodeRole
+  };
+
+  return cluster;
+}
 
 async function setupClusterSyncLoop() {
   if (clusterConfigSyncTimer) {
@@ -1839,10 +2023,11 @@ async function setupClusterSyncLoop() {
 
   const config = await readConfigFile(DEFAULT_CONFIG_PATH);
   if (!config) {
+    await reconcileClusterRuntime({ cluster: { enabled: false } });
     return;
   }
 
-  const cluster = normalizeClusterConfig(config);
+  const cluster = await reconcileClusterRuntime(config);
   if (!cluster.enabled || cluster.node_role !== 'secondary' || !cluster.sync.enabled) {
     return;
   }
@@ -1945,6 +2130,7 @@ async function rollbackDefaultConfigState(previousConfigRaw, previousSnapshotSta
     file_restored: false,
     snapshot_restored: false,
     cluster_sync_reloaded: false,
+    blacklist_feed_reloaded: false,
     runtime_reload_applied: false
   };
 
@@ -1968,6 +2154,13 @@ async function rollbackDefaultConfigState(previousConfigRaw, previousSnapshotSta
     rollback.cluster_sync_reloaded = true;
   } catch (error) {
     console.error('[Rollback] failed to restart cluster sync loop:', error.message || error);
+  }
+
+  try {
+    await setupBlacklistFeedLoop();
+    rollback.blacklist_feed_reloaded = true;
+  } catch (error) {
+    console.error('[Rollback] failed to restart blacklist feed loop:', error.message || error);
   }
 
   const reloadResult = await triggerNginxReload();
@@ -2003,6 +2196,7 @@ async function updateDefaultConfigWithReload(mutateConfig) {
   }
 
   nextConfig.cluster = normalizeClusterConfig(nextConfig);
+  nextConfig.blacklist_feeds = normalizeBlacklistFeedsConfig(nextConfig.blacklist_feeds);
   const written = await writeConfigFile(DEFAULT_CONFIG_PATH, nextConfig);
   if (!written) {
     return {
@@ -2059,6 +2253,12 @@ async function updateDefaultConfigWithReload(mutateConfig) {
       rollback,
       replication
     };
+  }
+
+  try {
+    await setupBlacklistFeedLoop();
+  } catch (error) {
+    console.error('[blacklist-feeds] failed to reload feed loop after config update:', error.message || error);
   }
 
   return {
@@ -2364,6 +2564,348 @@ async function scanRedisKeys(pattern, count = 200) {
   return keys;
 }
 
+const BLACKLIST_FEED_IPS_KEY = 'safeline:blacklist_feed:ips';
+const BLACKLIST_FEED_RANGES_KEY = 'safeline:blacklist_feed:ranges';
+const BLACKLIST_FEED_STATUS_KEY = 'safeline:blacklist_feed:status';
+const DEFAULT_BLACKLIST_FEED_SOURCE = Object.freeze({
+  id: 'blocklist-de-all',
+  name: 'blocklist.de all',
+  url: 'https://lists.blocklist.de/lists/all.txt',
+  enabled: true,
+  format: 'ip_list'
+});
+
+function sanitizeFeedId(value, fallback) {
+  const normalized = String(value || fallback || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || String(fallback || 'feed').toLowerCase();
+}
+
+function sanitizeFeedUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return '';
+    }
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+function normalizeBlacklistFeedSource(source, index = 0) {
+  const draft = isObject(source) ? source : {};
+  const url = sanitizeFeedUrl(draft.url);
+  if (!url) {
+    return null;
+  }
+
+  return {
+    id: sanitizeFeedId(draft.id, `feed-${index + 1}`),
+    name: String(draft.name || draft.id || `Feed ${index + 1}`).trim() || `Feed ${index + 1}`,
+    url,
+    enabled: draft.enabled !== false,
+    format: 'ip_list'
+  };
+}
+
+function normalizeBlacklistFeedsConfig(input) {
+  const draft = isObject(input) ? input : {};
+  const sources = [];
+  const seen = new Set();
+  const sourceList = Array.isArray(draft.sources) ? draft.sources : [DEFAULT_BLACKLIST_FEED_SOURCE];
+
+  sourceList.forEach((item, index) => {
+    const normalized = normalizeBlacklistFeedSource(item, index);
+    if (!normalized || seen.has(normalized.id)) {
+      return;
+    }
+    seen.add(normalized.id);
+    sources.push(normalized);
+  });
+
+  if (sources.length === 0) {
+    sources.push({ ...DEFAULT_BLACKLIST_FEED_SOURCE });
+  }
+
+  return {
+    enabled: draft.enabled !== false,
+    refresh_interval: clampInteger(draft.refresh_interval, 300, 86400, 1800),
+    request_timeout_ms: clampInteger(draft.request_timeout_ms, 1000, 60000, 10000),
+    max_entries_per_source: clampInteger(draft.max_entries_per_source, 100, 200000, 50000),
+    sources
+  };
+}
+
+function parseBlacklistFeedResponse(content, maxEntries) {
+  const exactIps = [];
+  const ranges = [];
+  const seen = new Set();
+  const lines = String(content || '').split(/\r?\n/);
+  const limit = Math.max(100, parseInt(maxEntries || 50000, 10));
+
+  for (const line of lines) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';') || trimmed.startsWith('//')) {
+      continue;
+    }
+
+    const token = trimmed.split(/\s+/)[0];
+    const entry = normalizeBlacklistEntry(token);
+    if (!entry || seen.has(entry.type + ':' + entry.value)) {
+      continue;
+    }
+
+    seen.add(entry.type + ':' + entry.value);
+    if (entry.type === 'ip') {
+      exactIps.push(entry.value);
+    } else {
+      ranges.push(entry.raw);
+    }
+
+    if ((exactIps.length + ranges.length) >= limit) {
+      break;
+    }
+  }
+
+  return {
+    ips: exactIps,
+    ranges
+  };
+}
+
+async function writeBlacklistFeedSnapshot(snapshot) {
+  const data = isObject(snapshot) ? snapshot : {};
+  const ips = Array.isArray(data.ips) ? data.ips : [];
+  const ranges = Array.isArray(data.ranges) ? data.ranges : [];
+  const status = isObject(data.status) ? data.status : {};
+  const ttlSeconds = clampInteger(data.ttl_seconds, 300, 7 * 24 * 60 * 60, 3 * 60 * 60);
+
+  const pipeline = redis.pipeline();
+  pipeline.del(BLACKLIST_FEED_IPS_KEY);
+  if (ips.length > 0) {
+    pipeline.sadd(BLACKLIST_FEED_IPS_KEY, ...ips);
+    pipeline.expire(BLACKLIST_FEED_IPS_KEY, ttlSeconds);
+  }
+  pipeline.set(BLACKLIST_FEED_RANGES_KEY, JSON.stringify(ranges));
+  pipeline.expire(BLACKLIST_FEED_RANGES_KEY, ttlSeconds);
+  pipeline.set(BLACKLIST_FEED_STATUS_KEY, JSON.stringify(status));
+  pipeline.expire(BLACKLIST_FEED_STATUS_KEY, ttlSeconds);
+  await pipeline.exec();
+}
+
+async function writeBlacklistFeedStatus(status, ttlSeconds) {
+  const normalizedTtl = clampInteger(ttlSeconds, 300, 7 * 24 * 60 * 60, 3 * 60 * 60);
+  const pipeline = redis.pipeline();
+  pipeline.set(BLACKLIST_FEED_STATUS_KEY, JSON.stringify(isObject(status) ? status : {}));
+  pipeline.expire(BLACKLIST_FEED_STATUS_KEY, normalizedTtl);
+  pipeline.expire(BLACKLIST_FEED_IPS_KEY, normalizedTtl);
+  pipeline.expire(BLACKLIST_FEED_RANGES_KEY, normalizedTtl);
+  await pipeline.exec();
+}
+
+async function readBlacklistFeedStatus() {
+  const [rawStatus, totalIps] = await Promise.all([
+    redis.get(BLACKLIST_FEED_STATUS_KEY),
+    redis.scard(BLACKLIST_FEED_IPS_KEY)
+  ]);
+
+  let status = {};
+  if (rawStatus) {
+    try {
+      status = JSON.parse(rawStatus);
+    } catch (_) {
+      status = {};
+    }
+  }
+
+  return {
+    ...status,
+    total_ips: Number(totalIps || 0) || 0
+  };
+}
+
+async function refreshBlacklistFeeds(options = {}) {
+  const config = options.config || await readConfigFile(DEFAULT_CONFIG_PATH) || {};
+  const feedConfig = normalizeBlacklistFeedsConfig(config.blacklist_feeds);
+  const now = Date.now();
+
+  if (!feedConfig.enabled) {
+    const disabledStatus = {
+      enabled: false,
+      updated_at: now,
+      total_ips: 0,
+      total_ranges: 0,
+      sources: feedConfig.sources.map((source) => ({
+        ...source,
+        fetched_at: null,
+        success: false,
+        entry_count: 0,
+        ip_count: 0,
+        range_count: 0,
+        message: 'feeds_disabled'
+      }))
+    };
+
+    await writeBlacklistFeedSnapshot({
+      ips: [],
+      ranges: [],
+      status: disabledStatus,
+      ttl_seconds: Math.max(300, feedConfig.refresh_interval * 2)
+    });
+    return disabledStatus;
+  }
+
+  const allIps = new Set();
+  const allRanges = [];
+  const seenRanges = new Set();
+  const sourceStatuses = [];
+  let enabledSourceCount = 0;
+  let successfulSourceCount = 0;
+
+  for (const source of feedConfig.sources) {
+    if (!source.enabled) {
+      sourceStatuses.push({
+        ...source,
+        fetched_at: null,
+        success: false,
+        entry_count: 0,
+        ip_count: 0,
+        range_count: 0,
+        message: 'disabled'
+      });
+      continue;
+    }
+
+    enabledSourceCount += 1;
+
+    try {
+      const response = await axios.get(source.url, {
+        timeout: feedConfig.request_timeout_ms,
+        responseType: 'text',
+        validateStatus: (status) => status >= 200 && status < 300
+      });
+
+      const parsed = parseBlacklistFeedResponse(response.data, feedConfig.max_entries_per_source);
+      parsed.ips.forEach((ip) => allIps.add(ip));
+      parsed.ranges.forEach((entry) => {
+        const normalized = normalizeIpRangeEntry(entry);
+        if (!normalized || seenRanges.has(normalized.identity)) {
+          return;
+        }
+        seenRanges.add(normalized.identity);
+        allRanges.push(normalized.raw);
+      });
+
+      sourceStatuses.push({
+        ...source,
+        fetched_at: now,
+        success: true,
+        entry_count: parsed.ips.length + parsed.ranges.length,
+        ip_count: parsed.ips.length,
+        range_count: parsed.ranges.length,
+        message: 'ok'
+      });
+      successfulSourceCount += 1;
+    } catch (error) {
+      sourceStatuses.push({
+        ...source,
+        fetched_at: now,
+        success: false,
+        entry_count: 0,
+        ip_count: 0,
+        range_count: 0,
+        message: error.message || 'fetch_failed'
+      });
+    }
+  }
+
+  const status = {
+    enabled: true,
+    updated_at: now,
+    total_ips: allIps.size,
+    total_ranges: allRanges.length,
+    sources: sourceStatuses
+  };
+
+  const ttlSeconds = Math.max(300, feedConfig.refresh_interval * 3);
+  if (enabledSourceCount > 0 && successfulSourceCount === 0) {
+    const previousStatus = await readBlacklistFeedStatus();
+    const staleStatus = {
+      ...status,
+      total_ips: Number(previousStatus.total_ips || 0) || 0,
+      total_ranges: Number(previousStatus.total_ranges || 0) || 0,
+      stale: true
+    };
+    await writeBlacklistFeedStatus(staleStatus, ttlSeconds);
+    return staleStatus;
+  }
+
+  await writeBlacklistFeedSnapshot({
+    ips: Array.from(allIps),
+    ranges: allRanges,
+    status,
+    ttl_seconds: ttlSeconds
+  });
+
+  return status;
+}
+
+let blacklistFeedTimer = null;
+let blacklistFeedRefreshInFlight = null;
+
+async function triggerBlacklistFeedRefresh(configOverride) {
+  if (blacklistFeedRefreshInFlight) {
+    return blacklistFeedRefreshInFlight;
+  }
+
+  blacklistFeedRefreshInFlight = (async () => {
+    try {
+      return await refreshBlacklistFeeds({ config: configOverride });
+    } finally {
+      blacklistFeedRefreshInFlight = null;
+    }
+  })();
+
+  return blacklistFeedRefreshInFlight;
+}
+
+async function setupBlacklistFeedLoop() {
+  if (blacklistFeedTimer) {
+    clearInterval(blacklistFeedTimer);
+    blacklistFeedTimer = null;
+  }
+
+  const config = await readConfigFile(DEFAULT_CONFIG_PATH);
+  const feedConfig = normalizeBlacklistFeedsConfig(config && config.blacklist_feeds);
+
+  if (!feedConfig.enabled) {
+    triggerBlacklistFeedRefresh({ blacklist_feeds: feedConfig }).catch((error) => {
+      console.error('[blacklist-feeds] refresh failed:', error.message || error);
+    });
+    return;
+  }
+
+  triggerBlacklistFeedRefresh({ ...config, blacklist_feeds: feedConfig }).catch((error) => {
+    console.error('[blacklist-feeds] refresh failed:', error.message || error);
+  });
+
+  const intervalMs = Math.max(300000, feedConfig.refresh_interval * 1000);
+  blacklistFeedTimer = setInterval(async () => {
+    try {
+      const latest = await readConfigFile(DEFAULT_CONFIG_PATH);
+      await triggerBlacklistFeedRefresh(latest || { blacklist_feeds: feedConfig });
+    } catch (error) {
+      console.error('[blacklist-feeds] refresh failed:', error.message || error);
+    }
+  }, intervalMs);
+}
+
 function parseZsetWithScores(items) {
   const result = [];
   if (!Array.isArray(items)) {
@@ -2566,6 +3108,7 @@ apiRouter.get('/config', async (req, res) => {
     }
 
     config.cluster = normalizeClusterConfig(config);
+    config.blacklist_feeds = normalizeBlacklistFeedsConfig(config.blacklist_feeds);
     config.anti_bypass = normalizeAntiBypassConfig(config);
     config.honeypot_settings = normalizeHoneypotSettingsConfig(config);
     config.sampling = normalizeSamplingConfig(config);
@@ -2583,6 +3126,7 @@ apiRouter.get('/cluster/config', clusterAuthMiddleware, async (req, res) => {
     }
 
     config.cluster = normalizeClusterConfig(config);
+    config.blacklist_feeds = normalizeBlacklistFeedsConfig(config.blacklist_feeds);
     config.anti_bypass = normalizeAntiBypassConfig(config);
     config.honeypot_settings = normalizeHoneypotSettingsConfig(config);
     config.sampling = normalizeSamplingConfig(config);
@@ -2603,6 +3147,7 @@ apiRouter.put('/config', async (req, res) => {
     const result = await updateDefaultConfigWithReload((nextConfig, currentConfig) => {
       const mergedConfig = deepMerge(currentConfig, req.body);
       mergedConfig.cluster = normalizeClusterConfig(mergedConfig);
+      mergedConfig.blacklist_feeds = normalizeBlacklistFeedsConfig(mergedConfig.blacklist_feeds);
       mergedConfig.anti_bypass = normalizeAntiBypassConfig(mergedConfig);
       mergedConfig.honeypot_settings = normalizeHoneypotSettingsConfig(mergedConfig);
       mergedConfig.sampling = normalizeSamplingConfig(mergedConfig);
@@ -3383,6 +3928,74 @@ apiRouter.delete('/blacklist/:ip', async (req, res) => {
     return await handleBlacklistDelete(req, res, req.params.ip);
   } catch (error) {
     res.status(500).json({ success: false, message: '浠庨粦鍚嶅崟涓Щ闄P澶辫触', error: error.message });
+  }
+});
+
+apiRouter.get('/blacklist/feeds', async (_req, res) => {
+  try {
+    const config = await readConfigFile(DEFAULT_CONFIG_PATH) || {};
+    const feedConfig = normalizeBlacklistFeedsConfig(config.blacklist_feeds);
+    const status = await readBlacklistFeedStatus();
+    return res.json({
+      success: true,
+      data: {
+        config: feedConfig,
+        status
+      }
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to fetch blacklist feeds');
+  }
+});
+
+apiRouter.put('/blacklist/feeds', async (req, res) => {
+  try {
+    const payload = isObject(req.body) ? req.body : {};
+    const feedConfig = normalizeBlacklistFeedsConfig(payload);
+    const result = await updateDefaultConfigWithReload((nextConfig) => {
+      nextConfig.blacklist_feeds = feedConfig;
+      return {
+        changed: true,
+        message: 'Blacklist feeds updated and published'
+      };
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 500).json({
+        success: false,
+        message: result.message,
+        reload: result.reload || null,
+        rollback: result.rollback || null
+      });
+    }
+
+    await setupBlacklistFeedLoop();
+    const status = await triggerBlacklistFeedRefresh({ blacklist_feeds: feedConfig });
+    return res.json({
+      success: true,
+      message: result.message,
+      data: {
+        config: feedConfig,
+        status
+      },
+      snapshot: result.snapshot || null,
+      reload: result.reload || null
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to update blacklist feeds');
+  }
+});
+
+apiRouter.post('/blacklist/feeds/refresh', async (_req, res) => {
+  try {
+    const status = await triggerBlacklistFeedRefresh();
+    return res.json({
+      success: true,
+      message: 'Blacklist feeds refreshed',
+      data: status
+    });
+  } catch (error) {
+    return sendError(res, 500, error.message || 'Failed to refresh blacklist feeds');
   }
 });
 
@@ -4264,20 +4877,18 @@ app.use((err, req, res, next) => {
 // 鍚姩搴旂敤
 async function start() {
   await ensureDirectories();
-
-  // Initialize cluster manager if enabled
-  if (process.env.CLUSTER_ENABLED !== 'false') {
-    try {
-      await clusterManager.initialize();
-      heartbeatWorker.start();
-      console.log('[Cluster] Cluster management initialized');
-    } catch (error) {
-      console.error('[Cluster] Failed to initialize cluster manager:', error.message);
-      console.log('[Cluster] Continuing without cluster features');
-    }
+  try {
+    await setupClusterSyncLoop();
+  } catch (error) {
+    console.error('[Cluster] Failed to reconcile cluster runtime on startup:', error.message || error);
+    console.log('[Cluster] Continuing without cluster features');
   }
 
-  await setupClusterSyncLoop();
+  try {
+    await setupBlacklistFeedLoop();
+  } catch (error) {
+    console.error('[blacklist-feeds] Failed to initialize feed loop on startup:', error.message || error);
+  }
 
   // Start LLM audit worker (polls Redis queue every 1.5s)
   const { LLMWorker } = require('./llm_worker');

@@ -1,4 +1,8 @@
+local cjson = require "cjson"
+local config_dict = ngx.shared.safeline_config
 local blacklist_bloom = require "blacklist_bloom"
+local cluster_subscribers_started = false
+local ml_runtime_started = false
 
 -- 启动 Bloom filter 定时刷新
 local ok, err = blacklist_bloom.start()
@@ -35,9 +39,26 @@ if ngx.worker.id() == 0 then
 
     schedule_cleanup()
 
-    -- Start cluster Pub/Sub subscribers if cluster is enabled
-    local cluster_enabled = os.getenv("CLUSTER_ENABLED")
-    if cluster_enabled ~= "false" then
+    local function cluster_runtime_enabled()
+        if os.getenv("CLUSTER_ENABLED") == "false" then
+            return false
+        end
+
+        local raw = config_dict:get("cluster")
+        if type(raw) ~= "string" or raw == "" then
+            return false
+        end
+
+        local ok_cluster, cluster = pcall(cjson.decode, raw)
+        return ok_cluster and type(cluster) == "table" and cluster.enabled == true
+    end
+
+    local function ensure_cluster_subscribers_started()
+        if cluster_subscribers_started or not cluster_runtime_enabled() then
+            return
+        end
+
+        cluster_subscribers_started = true
         ngx.log(ngx.NOTICE, "[Cluster] Starting Pub/Sub subscribers")
 
         -- Subscribe to config reload events
@@ -60,12 +81,31 @@ if ngx.worker.id() == 0 then
             end
         end)
     end
+
+    ensure_cluster_subscribers_started()
+
+    local function schedule_cluster_runtime_watch()
+        local ok_t, t_err = ngx.timer.at(5, function(premature)
+            if premature then return end
+            ensure_cluster_subscribers_started()
+            schedule_cluster_runtime_watch()
+        end)
+        if not ok_t then
+            ngx.log(ngx.ERR, "Failed to schedule cluster runtime watcher: ", t_err)
+        end
+    end
+
+    schedule_cluster_runtime_watch()
 end
 
 -- ─── ML Engine Initialisation ────────────────────────────────────────────
-local ml_enabled = os.getenv("ML_ENABLED")
-if ml_enabled == "true" then
-    local ml_inference = require "ml_inference"
+local ml_inference = require "ml_inference"
+
+local function ensure_ml_runtime_started()
+    if ml_runtime_started then
+        return
+    end
+    ml_runtime_started = true
 
     -- Attempt to load the active model a couple of seconds after startup
     -- (Redis might not be fully ready at init_worker time)
@@ -90,3 +130,5 @@ if ml_enabled == "true" then
         end)
     end
 end
+
+ensure_ml_runtime_started()

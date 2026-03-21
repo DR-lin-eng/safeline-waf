@@ -47,6 +47,21 @@
     "refresh_interval": 30,
     "scan_count": 1000
   },
+  "blacklist_feeds": {
+    "enabled": true,
+    "refresh_interval": 1800,
+    "request_timeout_ms": 10000,
+    "max_entries_per_source": 50000,
+    "sources": [
+      {
+        "id": "blocklist-de-all",
+        "name": "blocklist.de all",
+        "url": "https://lists.blocklist.de/lists/all.txt",
+        "enabled": true,
+        "format": "ip_list"
+      }
+    ]
+  },
   "ddos_protection": {
     "url_threshold": 60,
     "url_window": 60,
@@ -142,5 +157,11 @@
     "enabled": true,
     "rate": 0.01,
     "anomaly_threshold": 5.0
+  },
+  "owasp_crs": {
+    "enabled": true,
+    "paranoia_level": 1,
+    "inbound_threshold": 5,
+    "max_matches": 8
   }
 }

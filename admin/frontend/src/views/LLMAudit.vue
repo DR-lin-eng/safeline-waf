@@ -182,31 +182,59 @@
             <button type="button" class="close" @click="showConfigModal = false">&times;</button>
           </div>
           <div class="modal-body">
-            <div class="form-row">
-              <div class="form-group col-md-6">
-                <label class="small font-weight-bold">LLM 提供商</label>
-                <select v-model="editConfig.provider" class="form-control form-control-sm">
-                  <option value="openai">OpenAI 兼容（OpenAI / DeepSeek / Ollama）</option>
-                  <option value="anthropic">Anthropic Claude</option>
-                </select>
-              </div>
-              <div class="form-group col-md-6">
-                <label class="small font-weight-bold">模型名称</label>
-                <input v-model="editConfig.model" class="form-control form-control-sm" placeholder="gpt-4o-mini / claude-haiku-4-5-20251001" />
-              </div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <label class="small font-weight-bold mb-0">LLM 提供商组</label>
+              <button class="btn btn-sm btn-outline-primary" @click="addProvider">新增提供商</button>
             </div>
-            <div class="form-group" v-if="editConfig.provider !== 'anthropic'">
-              <label class="small font-weight-bold">API Endpoint</label>
-              <input v-model="editConfig.api_endpoint" class="form-control form-control-sm" placeholder="https://api.openai.com/v1" />
-            </div>
-            <div class="form-group">
-              <label class="small font-weight-bold">API Key</label>
-              <input
-                v-model="editConfig.api_key"
-                class="form-control form-control-sm"
-                type="password"
-                :placeholder="llmConfig.api_key_masked || '输入 API Key（留空保持不变）'"
-              />
+
+            <div v-for="(provider, index) in editConfig.providers" :key="provider.id || index" class="border rounded p-3 mb-3">
+              <div class="form-row">
+                <div class="form-group col-md-3">
+                  <label class="small font-weight-bold">名称</label>
+                  <input v-model="provider.name" class="form-control form-control-sm" placeholder="Primary / Fallback" />
+                </div>
+                <div class="form-group col-md-3">
+                  <label class="small font-weight-bold">LLM 提供商</label>
+                  <select v-model="provider.provider" class="form-control form-control-sm" @change="handleProviderChange(provider)">
+                    <option value="openai">OpenAI 兼容</option>
+                    <option value="openai_responses">OpenAI Responses</option>
+                    <option value="anthropic">Anthropic Claude</option>
+                  </select>
+                </div>
+                <div class="form-group col-md-3">
+                  <label class="small font-weight-bold">模型名称</label>
+                  <input v-model="provider.model" class="form-control form-control-sm" placeholder="gpt-4o-mini / gpt-5.4 / claude-haiku-4-5-20251001" />
+                </div>
+                <div class="form-group col-md-2">
+                  <label class="small font-weight-bold">启用</label>
+                  <div class="custom-control custom-switch mt-2">
+                    <input :id="`llm-provider-enabled-${index}`" v-model="provider.enabled" type="checkbox" class="custom-control-input" />
+                    <label class="custom-control-label" :for="`llm-provider-enabled-${index}`">启用</label>
+                  </div>
+                </div>
+                <div class="form-group col-md-1 d-flex align-items-end">
+                  <button class="btn btn-sm btn-outline-danger w-100" @click="removeProvider(index)" :disabled="editConfig.providers.length <= 1">删</button>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group" :class="provider.provider !== 'anthropic' ? 'col-md-8' : 'col-md-6'">
+                  <label class="small font-weight-bold">API Endpoint</label>
+                  <input v-model="provider.api_endpoint" class="form-control form-control-sm" :placeholder="endpointPlaceholderFor(provider)" />
+                </div>
+                <div class="form-group" :class="provider.provider !== 'anthropic' ? 'col-md-4' : 'col-md-6'">
+                  <label class="small font-weight-bold">请求超时 (ms)</label>
+                  <input v-model.number="provider.timeout_ms" type="number" min="3000" max="60000" class="form-control form-control-sm" />
+                </div>
+              </div>
+              <div class="form-group mb-0">
+                <label class="small font-weight-bold">API Key</label>
+                <input
+                  v-model="provider.api_key"
+                  class="form-control form-control-sm"
+                  type="password"
+                  :placeholder="provider.api_key_masked || '输入 API Key（留空保持不变）'"
+                />
+              </div>
             </div>
             <div class="form-row">
               <div class="form-group col-md-4">
@@ -229,7 +257,7 @@
                 <input v-model.number="editConfig.verdict_cache_ttl_s" type="number" min="60" max="86400" class="form-control form-control-sm" />
               </div>
               <div class="form-group col-md-6">
-                <label class="small font-weight-bold">请求超时 (ms)</label>
+                <label class="small font-weight-bold">全局默认超时 (ms)</label>
                 <input v-model.number="editConfig.timeout_ms" type="number" min="3000" max="60000" class="form-control form-control-sm" />
               </div>
             </div>
@@ -237,6 +265,12 @@
               <div class="custom-control custom-switch">
                 <input type="checkbox" class="custom-control-input" id="llmEnabled" v-model="editConfig.enabled" />
                 <label class="custom-control-label" for="llmEnabled">启用 LLM 审计</label>
+              </div>
+            </div>
+            <div class="form-group mb-0">
+              <div class="custom-control custom-switch">
+                <input type="checkbox" class="custom-control-input" id="llmFailoverEnabled" v-model="editConfig.failover_enabled" />
+                <label class="custom-control-label" for="llmFailoverEnabled">启用故障转移</label>
               </div>
             </div>
           </div>
@@ -307,7 +341,28 @@ export default {
   created() {
     this.loadAll()
   },
+  computed: {
+  },
   methods: {
+    buildDefaultProvider() {
+      return {
+        id: `provider-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+        name: 'Primary',
+        provider: 'openai_responses',
+        api_endpoint: 'https://api.openai.com/v1/responses',
+        model: 'gpt-5.4',
+        api_key: '',
+        enabled: true,
+        timeout_ms: 15000,
+      }
+    },
+    endpointPlaceholderFor(provider) {
+      return provider && provider.provider === 'openai_responses'
+        ? 'https://api.openai.com/v1/responses'
+        : provider && provider.provider === 'anthropic'
+          ? 'https://api.anthropic.com'
+          : 'https://api.openai.com/v1'
+    },
     async loadAll() {
       await Promise.all([this.loadStats(), this.loadConfig(), this.loadVerdicts(true)])
     },
@@ -322,7 +377,22 @@ export default {
         const { data } = await axios.get('/llm/config', { headers: authHeaders() })
         if (data.success) {
           this.llmConfig = data.data || {}
-          this.editConfig = { ...this.llmConfig, api_key: '' }
+          this.editConfig = {
+            enabled: true,
+            failover_enabled: true,
+            providers: [this.buildDefaultProvider()],
+            ...this.llmConfig,
+            api_key: '',
+          }
+          if (!Array.isArray(this.editConfig.providers) || this.editConfig.providers.length === 0) {
+            this.editConfig.providers = [this.buildDefaultProvider()]
+          }
+          this.editConfig.providers = this.editConfig.providers.map((provider, index) => ({
+            ...this.buildDefaultProvider(),
+            name: index === 0 ? 'Primary' : `Fallback ${index}`,
+            ...provider,
+            api_key: '',
+          }))
         }
       } catch (_) {}
     },
@@ -343,7 +413,11 @@ export default {
       this.saving = true
       try {
         const payload = { ...this.editConfig }
-        if (!payload.api_key) delete payload.api_key
+        payload.providers = (payload.providers || []).map((provider) => {
+          const clone = { ...provider }
+          if (!clone.api_key) delete clone.api_key
+          return clone
+        })
         const { data } = await axios.put('/llm/config', payload, { headers: authHeaders() })
         if (data.success) {
           this.llmConfig = data.data || {}
@@ -359,9 +433,16 @@ export default {
     async testConnection() {
       this.testing = true
       try {
-        const { data } = await axios.post('/llm/test', {}, { headers: authHeaders() })
+        const payload = { ...this.editConfig }
+        payload.providers = (payload.providers || []).map((provider) => {
+          const clone = { ...provider }
+          if (!clone.api_key) delete clone.api_key
+          return clone
+        })
+        const { data } = await axios.post('/llm/test', payload, { headers: authHeaders() })
         if (data.success && data.data && data.data.connected) {
-          this.$root.$emit('toast', { level: 'success', message: '连接成功！' })
+          const providerName = data.data.provider_name || data.data.provider_id || 'provider'
+          this.$root.$emit('toast', { level: 'success', message: `连接成功：${providerName}` })
         } else {
           const msg = (data.data && data.data.error) || '连接失败'
           this.$root.$emit('toast', { level: 'error', message: msg })
@@ -371,6 +452,40 @@ export default {
       } finally {
         this.testing = false
       }
+    },
+    handleProviderChange(provider) {
+      if (!provider) return
+      if (provider.provider === 'openai_responses') {
+        if (!provider.api_endpoint || provider.api_endpoint === 'https://api.openai.com/v1') {
+          provider.api_endpoint = 'https://api.openai.com/v1/responses'
+        }
+        if (!provider.model || provider.model === 'gpt-4o-mini') {
+          provider.model = 'gpt-5.4'
+        }
+      } else if (provider.provider === 'openai') {
+        if (!provider.api_endpoint || provider.api_endpoint === 'https://api.openai.com/v1/responses') {
+          provider.api_endpoint = 'https://api.openai.com/v1'
+        }
+        if (!provider.model || provider.model === 'gpt-5.4') {
+          provider.model = 'gpt-4o-mini'
+        }
+      } else if (provider.provider === 'anthropic') {
+        if (!provider.api_endpoint) {
+          provider.api_endpoint = 'https://api.anthropic.com'
+        }
+        if (!provider.model || provider.model === 'gpt-4o-mini' || provider.model === 'gpt-5.4') {
+          provider.model = 'claude-haiku-4-5-20251001'
+        }
+      }
+    },
+    addProvider() {
+      const provider = this.buildDefaultProvider()
+      provider.name = `Fallback ${this.editConfig.providers.length}`
+      this.editConfig.providers = [...this.editConfig.providers, provider]
+    },
+    removeProvider(index) {
+      if ((this.editConfig.providers || []).length <= 1) return
+      this.editConfig.providers = this.editConfig.providers.filter((_, currentIndex) => currentIndex !== index)
     },
     async queueIp() {
       if (!this.manualIp) return

@@ -5,3 +5,8 @@ admin/frontend/node_modules/
 data/updater/*
 !data/updater/.gitkeep
 config/update/
+logs/
+config/certs/*.test.local.crt
+config/certs/*.test.local.key
+config/sites/*.test.local.json
+nginx/conf.d/*.test.local.conf

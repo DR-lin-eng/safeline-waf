@@ -10,6 +10,7 @@ local cache_dict = ngx.shared.safeline_cache
 local limit_dict = ngx.shared.safeline_limit
 local counters_dict = ngx.shared.safeline_counters
 local config_dict = ngx.shared.safeline_config
+local ml_dict = ngx.shared.safeline_ml
 
 local _random_seeded = false
 local function ensure_random_seeded()
@@ -232,27 +233,65 @@ end
 -- 检测自动化工具签名 (针对DDoS脚本)
 function _M.detect_automation_signature(headers, uri, method, client_ip)
     local signs = {}
+    local score = 0
+    local normalized_headers = {}
+    if type(headers) == "table" then
+        for key, value in pairs(headers) do
+            if type(key) == "string" then
+                normalized_headers[key:lower()] = value
+            end
+        end
+    end
+
+    local user_agent = tostring(normalized_headers["user-agent"] or ""):lower()
+
+    local automation_ua_patterns = {
+        "curl/",
+        "wget/",
+        "python-requests",
+        "python-urllib",
+        "go-http-client",
+        "okhttp/",
+        "scrapy/",
+        "phantomjs",
+        "headlesschrome",
+        "headless",
+        "playwright",
+        "selenium"
+    }
+
+    local function add_sign(name, weight)
+        table.insert(signs, name)
+        score = score + (tonumber(weight) or 0)
+    end
     
     -- 检查JA3指纹
-    if headers["X-JA3-Fingerprint"] then
-        table.insert(signs, "ja3_header")
+    if normalized_headers["x-ja3-fingerprint"] then
+        add_sign("ja3_header", 0.55)
+    end
+
+    for _, pattern in ipairs(automation_ua_patterns) do
+        if user_agent:find(pattern, 1, true) then
+            add_sign("automation_user_agent", 0.8)
+            break
+        end
     end
     
     -- 检查不常见的请求头组合
-    if headers["Pragma"] and headers["Cache-Control"] and 
-       headers["Accept-Encoding"] and headers["Accept-Language"] then
+    if normalized_headers["pragma"] and normalized_headers["cache-control"] and 
+       normalized_headers["accept-encoding"] and normalized_headers["accept-language"] then
         -- 标准的请求头顺序和组合
-        local normalized_headers = {}
+        local normalized_header_names = {}
         for k, _ in pairs(headers) do
-            table.insert(normalized_headers, k)
+            table.insert(normalized_header_names, k)
         end
-        table.sort(normalized_headers)
+        table.sort(normalized_header_names)
         
         -- 检查请求头是否过于一致
-        local headers_key = "headers:" .. table.concat(normalized_headers, "|")
+        local headers_key = "automation:headers:" .. client_ip .. ":" .. table.concat(normalized_header_names, "|")
         local count = safe_incr(cache_dict, headers_key, 1, 0, 300, 0)
         if count > 10 then
-            table.insert(signs, "consistent_headers")
+            add_sign("consistent_headers", 0.25)
         end
     end
     
@@ -299,12 +338,12 @@ function _M.detect_automation_signature(headers, uri, method, client_ip)
             
             -- 非人类用户的请求间隔往往有固定模式
             if std_dev < 0.2 and mean < 1.0 then
-                table.insert(signs, "regular_intervals")
+                add_sign("regular_intervals", 0.2)
             end
             
             -- 请求频率过高
             if mean < 0.05 then  -- 平均间隔小于50毫秒
-                table.insert(signs, "high_frequency")
+                add_sign("high_frequency", 0.35)
             end
         end
     end
@@ -312,7 +351,7 @@ function _M.detect_automation_signature(headers, uri, method, client_ip)
     cache_dict:set(last_req_key, now, 300)
     
     -- 检查HTTP方法分布的不自然
-    local methods_key = "methods:" .. client_ip
+    local methods_key = "automation:methods:" .. client_ip
     local methods_json = cache_dict:get(methods_key) or "{}"
     
     local success, methods = pcall(cjson.decode, methods_json)
@@ -338,7 +377,7 @@ function _M.detect_automation_signature(headers, uri, method, client_ip)
         
         -- 不自然的HTTP方法分布（太随机或太不随机）
         if entropy < 0.5 or entropy > 2.5 then
-            table.insert(signs, "abnormal_method_distribution")
+            add_sign("abnormal_method_distribution", 0.2)
         end
     end
     
@@ -373,17 +412,119 @@ function _M.detect_automation_signature(headers, uri, method, client_ip)
         
         -- 如果10个连续请求中超过8个URL不同，可能是随机URL攻击
         if unique_count > 8 then
-            table.insert(signs, "random_url_attack")
+            add_sign("random_url_attack", 0.25)
         end
     end
     
-    -- 根据检测到的自动化迹象的数量决定置信度
-    local confidence = 0
-    if #signs > 0 then
-        confidence = #signs / 8  -- 最多8个迹象，归一化到0-1
-    end
+    local confidence = math.min(1, score)
     
-    return confidence > 0.5, confidence, signs
+    return confidence >= 0.5, confidence, signs
+end
+
+function _M.detect_bot_intent(headers, uri, method, client_ip)
+    headers = type(headers) == "table" and headers or {}
+    uri = type(uri) == "string" and uri or "/"
+    method = type(method) == "string" and method or "GET"
+    client_ip = type(client_ip) == "string" and client_ip ~= "" and client_ip or (ngx.var.remote_addr or "0.0.0.0")
+
+    local path = (uri:match("^([^?]+)") or uri):lower()
+    local referer = tostring(headers["referer"] or headers["Referer"] or "")
+    local user_agent = tostring(headers["user-agent"] or headers["User-Agent"] or ""):lower()
+    local intent = nil
+    local score = 0
+    local signals = {}
+
+    local function add_signal(name, weight)
+        signals[#signals + 1] = name
+        score = score + (tonumber(weight) or 0)
+    end
+
+    local function track_window(key_prefix, window_seconds)
+        return safe_incr(cache_dict, key_prefix .. ":" .. client_ip, 1, 0, window_seconds or 300, 0)
+    end
+
+    local login_like = path:find("/login", 1, true)
+        or path:find("/signin", 1, true)
+        or path:find("/auth", 1, true)
+        or path:find("/session", 1, true)
+        or path:find("/token", 1, true)
+        or path:find("/wp-login.php", 1, true)
+
+    if login_like then
+        intent = "credential_stuffing"
+        if method == "POST" then
+          add_signal("login_post", 0.25)
+        end
+        local req_count = track_window("intent:cred", 300)
+        if req_count >= 5 then
+            add_signal("repeated_login_attempts", 0.35)
+        end
+        if referer == "" then
+            add_signal("missing_referer", 0.1)
+        end
+        if user_agent:find("curl/", 1, true) or user_agent:find("python-requests", 1, true) or user_agent:find("headless", 1, true) then
+            add_signal("automation_user_agent", 0.25)
+        end
+    end
+
+    local scraping_like = path:find("/product", 1, true)
+        or path:find("/catalog", 1, true)
+        or path:find("/search", 1, true)
+        or path:find("/list", 1, true)
+        or path:find("/item", 1, true)
+        or path:find("/detail", 1, true)
+
+    if not intent and scraping_like and method == "GET" then
+        intent = "content_scraping"
+        local req_count = track_window("intent:scrape", 120)
+        if req_count >= 8 then
+            add_signal("repeated_catalog_reads", 0.35)
+        end
+        if referer == "" then
+            add_signal("missing_referer", 0.1)
+        end
+        if user_agent:find("curl/", 1, true) or user_agent:find("python-requests", 1, true) or user_agent:find("scrapy/", 1, true) then
+            add_signal("automation_user_agent", 0.25)
+        end
+        if headers["X-JA3-Fingerprint"] or headers["x-ja3-fingerprint"] then
+            add_signal("ja3_header", 0.25)
+        end
+    end
+
+    local inventory_like = path:find("/cart", 1, true)
+        or path:find("/checkout", 1, true)
+        or path:find("/reserve", 1, true)
+        or path:find("/stock", 1, true)
+        or path:find("/inventory", 1, true)
+        or path:find("/buy", 1, true)
+
+    if not intent and inventory_like then
+        intent = "inventory_hoarding"
+        if method == "POST" or method == "PUT" or method == "PATCH" then
+            add_signal("state_changing_purchase_flow", 0.3)
+        end
+        local req_count = track_window("intent:inventory", 180)
+        if req_count >= 4 then
+            add_signal("repeated_purchase_attempts", 0.35)
+        end
+        if referer == "" then
+            add_signal("missing_referer", 0.1)
+        end
+        if user_agent:find("curl/", 1, true) or user_agent:find("python-requests", 1, true) or user_agent:find("headless", 1, true) then
+            add_signal("automation_user_agent", 0.25)
+        end
+    end
+
+    if not intent then
+        return nil, 0, {}
+    end
+
+    local confidence = math.min(1, score)
+    if confidence < 0.5 then
+        return nil, confidence, signals
+    end
+
+    return intent, confidence, signals
 end
 
 -- 高级缓存函数，支持多级缓存
@@ -686,6 +827,8 @@ function _M.extract_request_features(client_ip, uri, method, args, headers)
     local rate_key = "req_rate:" .. client_ip
     local req_count = safe_incr(limit_dict, rate_key, 1, 0, 60, 0)
     features.request_rate_60s = req_count
+    local rate5_key = "req_rate5:" .. client_ip
+    features.request_rate_5s = safe_incr(limit_dict, rate5_key, 1, 0, 5, 0)
     
     -- 计算路径深度
     features.path_depth = 0

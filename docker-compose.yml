@@ -19,8 +19,8 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       # 集群配置
       - NODE_ID=${NODE_ID:-node-1}
-      - NODE_ROLE=${NODE_ROLE:-worker}
-      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
+      - NODE_ROLE=${NODE_ROLE:-secondary}
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -28,7 +28,7 @@ services:
     networks:
       - safeline-network
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/_metrics"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -80,12 +80,14 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       # 密码哈希: 使用 node -e "require('bcryptjs').hash('yourpassword',12).then(console.log)" 生成
-      # 默认密码: SafeLine@2024 (生产环境必须修改!)
+      # 注意: .env 中的 bcrypt 哈希需将 $ 写成 $$
       - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
       - NODE_ENV=${NODE_ENV:-production}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
       # 集群配置
-      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-true}
+      - NODE_ID=${NODE_ID:-node-1}
+      - NODE_ROLE=${NODE_ROLE:-secondary}
+      - CLUSTER_ENABLED=${CLUSTER_ENABLED:-false}
       - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30}
     depends_on:
       redis:
@@ -148,7 +150,7 @@ services:
     networks:
       - safeline-network
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -21,6 +21,111 @@
     <div class="row">
       <div class="col-md-12">
         <div class="card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="card-title mb-0">订阅威胁情报源</h5>
+            <div>
+              <button type="button" class="btn btn-sm btn-outline-secondary mr-2" @click="refreshBlacklistFeeds" :disabled="loadingFeeds">
+                {{ loadingFeeds ? '刷新中...' : '立即刷新' }}
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary" @click="saveBlacklistFeeds" :disabled="loadingFeeds">
+                保存订阅配置
+              </button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group col-md-3">
+                <div class="form-check mt-4">
+                  <input id="feed-enabled" v-model="feedConfig.enabled" type="checkbox" class="form-check-input">
+                  <label class="form-check-label" for="feed-enabled">启用威胁情报订阅</label>
+                </div>
+              </div>
+              <div class="form-group col-md-3">
+                <label for="feed-refresh-interval">刷新间隔（秒）</label>
+                <input id="feed-refresh-interval" v-model.number="feedConfig.refresh_interval" type="number" class="form-control" min="300" max="86400">
+              </div>
+              <div class="form-group col-md-3">
+                <label for="feed-timeout">请求超时（毫秒）</label>
+                <input id="feed-timeout" v-model.number="feedConfig.request_timeout_ms" type="number" class="form-control" min="1000" max="60000">
+              </div>
+              <div class="form-group col-md-3">
+                <label for="feed-max-entries">单源最大条目数</label>
+                <input id="feed-max-entries" v-model.number="feedConfig.max_entries_per_source" type="number" class="form-control" min="100" max="200000">
+              </div>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <strong>源列表</strong>
+              <button type="button" class="btn btn-sm btn-outline-success" @click="addFeedSource">新增源</button>
+            </div>
+
+            <div v-if="feedConfig.sources.length === 0" class="text-muted mb-3">暂无订阅源</div>
+            <div v-else class="mb-3">
+              <div class="border rounded p-3 mb-2" v-for="(source, index) in feedConfig.sources" :key="source.id || index">
+                <div class="form-row">
+                  <div class="form-group col-md-2">
+                    <label>启用</label>
+                    <div class="form-check mt-2">
+                      <input :id="`feed-source-enabled-${index}`" v-model="source.enabled" type="checkbox" class="form-check-input">
+                      <label class="form-check-label" :for="`feed-source-enabled-${index}`">启用</label>
+                    </div>
+                  </div>
+                  <div class="form-group col-md-3">
+                    <label>名称</label>
+                    <input v-model.trim="source.name" type="text" class="form-control" placeholder="例如：blocklist.de all">
+                  </div>
+                  <div class="form-group col-md-2">
+                    <label>ID</label>
+                    <input v-model.trim="source.id" type="text" class="form-control" placeholder="feed-id">
+                  </div>
+                  <div class="form-group col-md-4">
+                    <label>URL</label>
+                    <input v-model.trim="source.url" type="url" class="form-control" placeholder="https://example.com/feed.txt">
+                  </div>
+                  <div class="form-group col-md-1 d-flex align-items-end">
+                    <button type="button" class="btn btn-sm btn-outline-danger w-100" @click="removeFeedSource(index)">删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="alert alert-secondary py-2 mb-0">
+              <div><strong>上次刷新：</strong>{{ formatFeedTime(feedStatus.updated_at) }}</div>
+              <div><strong>聚合 IP 数：</strong>{{ feedStatus.total_ips || 0 }}</div>
+              <div><strong>聚合网段数：</strong>{{ feedStatus.total_ranges || 0 }}</div>
+            </div>
+
+            <div class="table-responsive mt-3" v-if="Array.isArray(feedStatus.sources) && feedStatus.sources.length > 0">
+              <table class="table table-sm table-hover">
+                <thead>
+                  <tr>
+                    <th>源</th>
+                    <th>状态</th>
+                    <th>条目数</th>
+                    <th>上次抓取</th>
+                    <th>信息</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="source in feedStatus.sources" :key="source.id">
+                    <td>{{ source.name || source.id }}</td>
+                    <td>
+                      <span :class="source.success ? 'badge badge-success' : 'badge badge-secondary'">
+                        {{ source.success ? '成功' : (source.message === 'disabled' ? '已禁用' : '失败') }}
+                      </span>
+                    </td>
+                    <td>{{ source.entry_count || 0 }}</td>
+                    <td>{{ formatFeedTime(source.fetched_at) }}</td>
+                    <td class="text-monospace small">{{ source.message || '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-12">
+        <div class="card mb-4">
           <div class="card-header">
             <h5 class="card-title mb-0">IP 黑名单列表</h5>
           </div>
@@ -175,11 +280,25 @@ export default {
     return {
       blacklist: [],
       loading: true,
+      loadingFeeds: false,
       ipToRemove: null,
       newIp: {
         ip: '',
         banType: 'temporary',
         duration: 24
+      },
+      feedConfig: {
+        enabled: true,
+        refresh_interval: 1800,
+        request_timeout_ms: 10000,
+        max_entries_per_source: 50000,
+        sources: []
+      },
+      feedStatus: {
+        updated_at: null,
+        total_ips: 0,
+        total_ranges: 0,
+        sources: []
       }
     };
   },
@@ -191,6 +310,7 @@ export default {
   },
   created() {
     this.fetchBlacklist();
+    this.fetchBlacklistFeeds();
   },
   methods: {
     isProbablyValidIp(value) {
@@ -280,6 +400,77 @@ export default {
       } finally {
         this.loading = false;
       }
+    },
+    async fetchBlacklistFeeds() {
+      this.loadingFeeds = true;
+      try {
+        const response = await axios.get('/blacklist/feeds');
+        if (response.data && response.data.success && response.data.data) {
+          this.feedConfig = response.data.data.config || this.feedConfig;
+          this.feedStatus = response.data.data.status || this.feedStatus;
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '获取订阅源失败，请稍后重试。'));
+        }
+      } finally {
+        this.loadingFeeds = false;
+      }
+    },
+    addFeedSource() {
+      this.feedConfig.sources = [
+        ...(Array.isArray(this.feedConfig.sources) ? this.feedConfig.sources : []),
+        {
+          id: `feed-${Date.now()}`,
+          name: '',
+          url: '',
+          enabled: true,
+          format: 'ip_list'
+        }
+      ];
+    },
+    removeFeedSource(index) {
+      this.feedConfig.sources.splice(index, 1);
+    },
+    async saveBlacklistFeeds() {
+      try {
+        const response = await axios.put('/blacklist/feeds', this.feedConfig);
+        if (response.data && response.data.success) {
+          this.feedConfig = response.data.data.config || this.feedConfig;
+          this.feedStatus = response.data.data.status || this.feedStatus;
+          this.$toast.success('订阅源配置已保存并已发布。');
+        } else {
+          this.$toast.error((response.data && response.data.message) || '保存订阅源失败。');
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '保存订阅源失败，请稍后重试。'));
+        }
+      }
+    },
+    async refreshBlacklistFeeds() {
+      this.loadingFeeds = true;
+      try {
+        const response = await axios.post('/blacklist/feeds/refresh');
+        if (response.data && response.data.success) {
+          this.feedStatus = response.data.data || this.feedStatus;
+          await this.fetchBlacklist();
+          this.$toast.success('订阅源已刷新。');
+        } else {
+          this.$toast.error((response.data && response.data.message) || '刷新订阅源失败。');
+        }
+      } catch (error) {
+        if (shouldHandleLocally(error)) {
+          this.$toast.error(getApiErrorMessage(error, '刷新订阅源失败，请稍后重试。'));
+        }
+      } finally {
+        this.loadingFeeds = false;
+      }
+    },
+    formatFeedTime(value) {
+      if (!value) return '-';
+      const date = new Date(Number(value));
+      return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
     },
     formatExpiryTime(seconds) {
       if (seconds <= 0) return '已过期';

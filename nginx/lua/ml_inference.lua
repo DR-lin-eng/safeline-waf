@@ -9,6 +9,7 @@ local utils = require "utils"
 local cache_dict  = ngx.shared.safeline_cache
 local config_dict = ngx.shared.safeline_config
 local ml_dict     = ngx.shared.safeline_ml
+local limit_dict  = ngx.shared.safeline_limit
 
 -- ─── Per-worker model cache ───────────────────────────────────────────────
 local _model = {
@@ -61,6 +62,16 @@ end
 -- ─── Feature Extraction (30 features) ────────────────────────────────────
 -- Returns a 30-element numeric array ready for inference.
 function _M.extract_features(client_ip, uri, method, args, headers)
+    local normalized_headers = {}
+    if type(headers) == "table" then
+        for key, value in pairs(headers) do
+            if type(key) == "string" then
+                normalized_headers[string.lower(key)] = value
+            end
+        end
+    end
+    headers = normalized_headers
+
     local f = {}
 
     -- 1  param_count
@@ -70,12 +81,12 @@ function _M.extract_features(client_ip, uri, method, args, headers)
 
     -- 2  request_rate_60s  (reuse existing limit key)
     local rate_key = "req_rate:" .. client_ip
-    local req60 = tonumber(ml_dict:get(rate_key) or cache_dict:get(rate_key) or 0) or 0
+    local req60 = tonumber(limit_dict:get(rate_key) or ml_dict:get(rate_key) or cache_dict:get(rate_key) or 0) or 0
     f[2] = req60
 
     -- 3  request_rate_5s
     local rate5_key = "req_rate5:" .. client_ip
-    local req5 = tonumber(ml_dict:get(rate5_key) or 0) or 0
+    local req5 = tonumber(limit_dict:get(rate5_key) or ml_dict:get(rate5_key) or cache_dict:get(rate5_key) or 0) or 0
     f[3] = req5
 
     -- 4  path_depth
@@ -207,7 +218,7 @@ function _M.extract_features(client_ip, uri, method, args, headers)
     f[26] = (#paths > 0) and (uc2 / #paths) or 0
 
     -- 27  honeypot_hits
-    local hh = tonumber(ml_dict:get("ml:honeypot:" .. client_ip) or 0) or 0
+    local hh = tonumber(cache_dict:get("ml:honeypot:" .. client_ip) or ml_dict:get("ml:honeypot:" .. client_ip) or 0) or 0
     f[27] = hh
 
     -- 28  has_sql_keywords  (quick check)
@@ -360,9 +371,6 @@ function _M.collect_training_sample(client_ip, feature_vec, label, reason)
         if math.random() > 0.01 then return end
     end
 
-    local red = utils.get_redis(200)
-    if not red then return end
-
     local date_str = os.date("%Y-%m-%d")
     local sample = {
         ts      = ngx.now(),
@@ -374,14 +382,33 @@ function _M.collect_training_sample(client_ip, feature_vec, label, reason)
     }
 
     local ok_e, encoded = pcall(cjson.encode, sample)
-    if ok_e then
-        local rkey = "ml:samples:" .. date_str .. ":" .. label
-        red:lpush(rkey, encoded)
-        red:ltrim(rkey, 0, 49999)     -- Keep last 50k samples per label per day
-        red:expire(rkey, 7 * 86400)   -- 7-day TTL
+    if not ok_e then
+        return
     end
 
-    utils.release_redis(red)
+    ngx.timer.at(0, function(premature)
+        if premature then
+            return
+        end
+
+        local red = utils.get_redis(200)
+        if not red then
+            return
+        end
+
+        local ok = pcall(function()
+            local rkey = "ml:samples:" .. date_str .. ":" .. label
+            red:lpush(rkey, encoded)
+            red:ltrim(rkey, 0, 49999)     -- Keep last 50k samples per label per day
+            red:expire(rkey, 7 * 86400)   -- 7-day TTL
+        end)
+
+        if not ok then
+            ngx.log(ngx.WARN, "[ML] Failed to enqueue training sample")
+        end
+
+        utils.release_redis(red)
+    end)
 end
 
 -- ─── Pub/Sub Hot Reload ───────────────────────────────────────────────────
