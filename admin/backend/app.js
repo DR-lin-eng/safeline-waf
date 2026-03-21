@@ -23,7 +23,8 @@ const ClusterManager = require('./cluster');
 const HeartbeatWorker = require('./heartbeat-worker');
 const {
   CfShieldWorker,
-  readAttackTelemetry
+  readAttackTelemetry,
+  syncBlockedIpToCloudflare
 } = require('./cf_worker');
 
 function isStrongSecret(secret) {
@@ -765,9 +766,15 @@ function normalizeSiteProtectionConfig(siteConfig, antiBypassConfig, globalConfi
   const samplingRate = normalizeFloat(protectionInput.sampling_rate, samplingConfig.rate, 0, 1);
   const logSampleRate = normalizeFloat(protectionInput.log_sample_rate, samplingRate, 0, 1);
   const statsSampleRate = normalizeFloat(protectionInput.stats_sample_rate, samplingRate, 0, 1);
+  const challengeWhitelistPaths = Array.from(new Set(
+    (Array.isArray(protectionInput.challenge_whitelist_paths) ? protectionInput.challenge_whitelist_paths : [])
+      .map((item) => String(item || '').trim())
+      .filter((item) => item.startsWith('/'))
+  ));
 
   return {
     ...protectionInput,
+    challenge_whitelist_paths: challengeWhitelistPaths,
     request_sampling_enabled: toBooleanOrDefault(
       protectionInput.request_sampling_enabled,
       samplingConfig.enabled
@@ -3818,6 +3825,13 @@ apiRouter.post('/blacklist', async (req, res) => {
     const replication = config
       ? await replicateBlacklistToSecondaries(config, { action: 'add', ip: entry.value, duration: duration === -1 ? -1 : (duration || 86400) })
       : [];
+    const cloudflare = await syncBlockedIpToCloudflare(redis, JWT_SECRET, 'add', entry.value, {
+      mode: 'block'
+    }).catch((error) => ({
+      success: false,
+      skipped: false,
+      details: [{ ip: entry.value, action: 'add', error: error.message || String(error) }]
+    }));
     
     return res.json({
       success: true,
@@ -3833,7 +3847,8 @@ apiRouter.post('/blacklist', async (req, res) => {
         success: replication.filter((item) => item.success).length,
         failed: replication.filter((item) => !item.success).length,
         details: replication
-      }
+      },
+      cloudflare
     });
   } catch (error) {
     return sendError(res, 500, error.message || 'Failed to add blacklist entry');
@@ -3883,6 +3898,7 @@ async function handleBlacklistDelete(req, res, rawEntry) {
   const key = `safeline:blacklist:${entry.value}`;
   const previousTtl = await redis.ttl(key);
   await redis.del(key);
+  await redis.del(`llm:verdict:${entry.value}`);
 
   let snapshotBundle;
   try {
@@ -3901,10 +3917,25 @@ async function handleBlacklistDelete(req, res, rawEntry) {
     return sendError(res, 500, publishError.message || 'Snapshot publish failed');
   }
 
+  try {
+    await redis.publish('cluster:blacklist:sync', JSON.stringify({
+      action: 'remove',
+      ip: entry.value,
+      duration: 0
+    }));
+  } catch (publishError) {
+    console.error('[Blacklist] failed to publish local blacklist removal sync:', publishError.message || publishError);
+  }
+
   const config = await readConfigFile(DEFAULT_CONFIG_PATH);
   const replication = config
     ? await replicateBlacklistToSecondaries(config, { action: 'remove', ip: entry.value })
     : [];
+  const cloudflare = await syncBlockedIpToCloudflare(redis, JWT_SECRET, 'remove', entry.value).catch((error) => ({
+    success: false,
+    skipped: false,
+    details: [{ ip: entry.value, action: 'remove', error: error.message || String(error) }]
+  }));
 
   return res.json({
     success: true,
@@ -3920,7 +3951,8 @@ async function handleBlacklistDelete(req, res, rawEntry) {
       success: replication.filter((item) => item.success).length,
       failed: replication.filter((item) => !item.success).length,
       details: replication
-    }
+    },
+    cloudflare
   });
 }
 

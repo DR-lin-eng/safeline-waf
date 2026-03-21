@@ -126,8 +126,29 @@
       </div>
       <div class="col-md-12">
         <div class="card mb-4">
-          <div class="card-header">
-            <h5 class="card-title mb-0">IP 黑名单列表</h5>
+          <div class="card-header d-flex flex-column flex-lg-row justify-content-between align-items-lg-center">
+            <h5 class="card-title mb-3 mb-lg-0">IP 黑名单列表</h5>
+            <div class="d-flex flex-column flex-lg-row align-items-lg-center" style="gap: 0.5rem;">
+              <input
+                v-model.trim="searchQuery"
+                type="search"
+                class="form-control form-control-sm"
+                style="min-width: 240px;"
+                placeholder="搜索 IP / 网段 / 类型 / 状态"
+              >
+              <div class="btn-group btn-group-sm">
+                <button
+                  v-for="option in statusFilters"
+                  :key="option.value"
+                  type="button"
+                  class="btn"
+                  :class="statusFilter === option.value ? 'btn-primary' : 'btn-outline-secondary'"
+                  @click="statusFilter = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
           </div>
           <div class="card-body">
             <div v-if="loading" class="text-center py-5">
@@ -140,21 +161,27 @@
               <i class="bi bi-shield-check text-muted" style="font-size: 2rem;"></i>
               <p class="mt-2 text-muted">黑名单为空，没有被封禁的 IP。</p>
             </div>
+            <div v-else-if="filteredBlacklist.length === 0" class="text-center py-5">
+              <i class="bi bi-search text-muted" style="font-size: 2rem;"></i>
+              <p class="mt-2 text-muted">没有匹配当前搜索条件的黑名单条目。</p>
+            </div>
             <div v-else class="table-responsive">
               <table class="table table-hover">
                 <thead>
                   <tr>
                     <th>IP / 网段</th>
                     <th>类型</th>
+                    <th>来源</th>
                     <th>到期时间</th>
                     <th>状态</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in blacklist" :key="getEntryValue(item)">
+                  <tr v-for="item in filteredBlacklist" :key="getEntryValue(item)">
                     <td>{{ getEntryValue(item) }}</td>
                     <td>{{ getEntryTypeText(item) }}</td>
+                    <td>{{ getEntrySourceText(item) }}</td>
                     <td>
                       <span v-if="item.permanent">永久</span>
                       <span v-else-if="item.expires_in > 0">{{ formatExpiryTime(item.expires_in) }}</span>
@@ -299,13 +326,51 @@ export default {
         total_ips: 0,
         total_ranges: 0,
         sources: []
-      }
+      },
+      searchQuery: '',
+      statusFilter: 'all',
+      statusFilters: [
+        { label: '全部', value: 'all' },
+        { label: '临时', value: 'temporary' },
+        { label: '永久', value: 'permanent' },
+        { label: '已过期', value: 'expired' }
+      ]
     };
   },
   computed: {
     isCurrentEntryCidr() {
       const entry = String(this.newIp.ip || '').trim();
       return entry.includes('/') || entry.includes('-');
+    },
+    filteredBlacklist() {
+      const keyword = String(this.searchQuery || '').trim().toLowerCase();
+
+      return this.blacklist.filter((item) => {
+        if (this.statusFilter === 'temporary' && (item.permanent || !(item.expires_in > 0))) {
+          return false;
+        }
+        if (this.statusFilter === 'permanent' && !item.permanent) {
+          return false;
+        }
+        if (this.statusFilter === 'expired' && item.expires_in !== 0 && item.expires_in !== -2) {
+          return false;
+        }
+
+        if (!keyword) {
+          return true;
+        }
+
+        const haystack = [
+          this.getEntryValue(item),
+          this.getEntryTypeText(item),
+          this.getEntrySourceText(item),
+          this.getStatusText(item)
+        ]
+          .map((value) => String(value || '').toLowerCase())
+          .join(' ');
+
+        return haystack.includes(keyword);
+      });
     }
   },
   created() {
@@ -385,6 +450,21 @@ export default {
       }
 
       return entry.includes('/') ? 'CIDR' : 'IP';
+    },
+    getEntrySourceText(item) {
+      if (!item || typeof item !== 'object') {
+        return '-';
+      }
+
+      if (item.source === 'redis') {
+        return '运行时';
+      }
+
+      if (item.source === 'config') {
+        return '配置';
+      }
+
+      return item.source || '-';
     },
     async fetchBlacklist() {
       this.loading = true;
@@ -541,7 +621,7 @@ export default {
         if (response.data.success) {
           await this.fetchBlacklist();
           $('#addModal').modal('hide');
-          this.$toast.success('已加入 delta overlay，即将生效');
+          this.$toast.success('黑名单条目已添加。');
         } else {
           this.$toast.error((response.data && response.data.message) || '添加黑名单失败。');
         }

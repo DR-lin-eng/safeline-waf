@@ -296,6 +296,25 @@
             </div>
           </div>
 
+          <div class="form-row">
+            <div class="form-group col-md-6">
+              <div class="custom-control custom-switch mt-2">
+                <input type="checkbox" class="custom-control-input" id="cfBlacklistSync" v-model="editConfig.blacklist_sync_enabled" />
+                <label class="custom-control-label" for="cfBlacklistSync">同步风险 IP 到 Cloudflare</label>
+              </div>
+              <small class="text-muted">本地黑名单新增/删除后，会立即同步到 Cloudflare Zone 访问规则。</small>
+            </div>
+            <div class="form-group col-md-6">
+              <label>风险 IP 处置动作</label>
+              <select class="form-control" v-model="editConfig.blacklist_sync_mode">
+                <option value="block">block（推荐）</option>
+                <option value="managed_challenge">managed_challenge</option>
+                <option value="js_challenge">js_challenge</option>
+                <option value="challenge">challenge</option>
+              </select>
+            </div>
+          </div>
+
           <div class="d-flex justify-content-between align-items-center mt-3">
             <button class="btn btn-outline-secondary btn-sm" @click="testConnection" :disabled="testLoading">
               <i class="bi bi-plug mr-1"></i>
@@ -351,6 +370,8 @@ export default {
         activate_threshold: 50,
         deactivate_threshold: 10,
         cooldown_s: 300,
+        blacklist_sync_enabled: true,
+        blacklist_sync_mode: 'block',
         normal_security_level: 'medium',
         timeout_ms: 10000,
       },
@@ -424,6 +445,8 @@ export default {
             activate_threshold: r.data.data.activate_threshold || 50,
             deactivate_threshold: r.data.data.deactivate_threshold || 10,
             cooldown_s: r.data.data.cooldown_s || 300,
+            blacklist_sync_enabled: r.data.data.blacklist_sync_enabled !== false,
+            blacklist_sync_mode: r.data.data.blacklist_sync_mode || 'block',
             normal_security_level: r.data.data.normal_security_level || 'medium',
             timeout_ms: r.data.data.timeout_ms || 10000,
           };

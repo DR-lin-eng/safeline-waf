@@ -71,6 +71,19 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
       auth_email: resolvedAuthEmail,
       zone_ids: sanitizeZoneIds(draft.zone_ids, existing.zone_ids || []),
       enabled: draft.enabled !== undefined ? !!draft.enabled : !!existing.enabled,
+      blacklist_sync_enabled: draft.blacklist_sync_enabled !== undefined
+        ? !!draft.blacklist_sync_enabled
+        : (existing.blacklist_sync_enabled !== undefined ? !!existing.blacklist_sync_enabled : true),
+      blacklist_sync_mode: ['block', 'challenge', 'js_challenge', 'managed_challenge'].includes(draft.blacklist_sync_mode)
+        ? draft.blacklist_sync_mode
+        : (['block', 'challenge', 'js_challenge', 'managed_challenge'].includes(existing.blacklist_sync_mode)
+          ? existing.blacklist_sync_mode
+          : 'block'),
+      blacklist_sync_notes_prefix: String(
+        draft.blacklist_sync_notes_prefix !== undefined
+          ? draft.blacklist_sync_notes_prefix
+          : (existing.blacklist_sync_notes_prefix || 'SafeLine Risk IP')
+      ).trim() || 'SafeLine Risk IP',
       activate_threshold: Number(draft.activate_threshold) || existing.activate_threshold || 50,
       deactivate_threshold: Number(draft.deactivate_threshold) || existing.deactivate_threshold || 10,
       cooldown_s: Number(draft.cooldown_s) || existing.cooldown_s || 300,
@@ -120,6 +133,7 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
     try {
       const {
         api_token, auth_type, auth_email, zone_ids, enabled,
+        blacklist_sync_enabled, blacklist_sync_mode, blacklist_sync_notes_prefix,
         activate_threshold, deactivate_threshold,
         cooldown_s, normal_security_level, timeout_ms,
       } = req.body;
@@ -131,6 +145,9 @@ module.exports = function mountCfRoutes(router, redis, jwtSecret) {
         auth_email,
         zone_ids,
         enabled,
+        blacklist_sync_enabled,
+        blacklist_sync_mode,
+        blacklist_sync_notes_prefix,
         activate_threshold,
         deactivate_threshold,
         cooldown_s,

@@ -21,6 +21,7 @@ const ATTACK_PEAK_KEY = 'cf:attack:peak';
 const LEGACY_PEAK_KEY = 'cf:peak';
 const ATTACK_LAST_SEEN_KEY = 'cf:attack:last_seen';
 const LEGACY_LAST_ATTACK_AT_KEY = 'cf:last_attack_at';
+const CF_BLACKLIST_RULEMAP_PREFIX = 'cf:blacklist:rulemap:';
 
 async function readAttackTelemetry(redis) {
   const [scoreRaw, legacyScoreRaw, peakRaw, legacyPeakRaw, lastSeenRaw, legacyLastRaw] = await Promise.all([
@@ -76,15 +77,19 @@ function encryptToken(plaintext, secret) {
 }
 
 function decryptToken(ciphertext, secret) {
-  const [ivHex, tagHex, encHex] = ciphertext.split(':');
-  if (!ivHex || !tagHex || !encHex) return null;
-  const key      = crypto.createHash('sha256').update(secret).digest();
-  const iv       = Buffer.from(ivHex, 'hex');
-  const tag      = Buffer.from(tagHex, 'hex');
-  const enc      = Buffer.from(encHex, 'hex');
-  const decipher = crypto.createDecipheriv(ENC_ALGO, key, iv);
-  decipher.setAuthTag(tag);
-  return decipher.update(enc) + decipher.final('utf8');
+  try {
+    const [ivHex, tagHex, encHex] = ciphertext.split(':');
+    if (!ivHex || !tagHex || !encHex) return null;
+    const key      = crypto.createHash('sha256').update(secret).digest();
+    const iv       = Buffer.from(ivHex, 'hex');
+    const tag      = Buffer.from(tagHex, 'hex');
+    const enc      = Buffer.from(encHex, 'hex');
+    const decipher = crypto.createDecipheriv(ENC_ALGO, key, iv);
+    decipher.setAuthTag(tag);
+    return decipher.update(enc) + decipher.final('utf8');
+  } catch (_) {
+    return null;
+  }
 }
 
 // ── Cloudflare API client ────────────────────────────────────────────────────
@@ -170,6 +175,234 @@ class CfApiClient {
   getSecurityLevel(zoneId) {
     return this._request('GET', `/zones/${zoneId}/settings/security_level`);
   }
+
+  listAccessRules(zoneId, page = 1, perPage = 100) {
+    return this._request('GET', `/zones/${zoneId}/firewall/access_rules/rules?page=${page}&per_page=${perPage}`);
+  }
+
+  createAccessRule(zoneId, target, value, mode, notes = '') {
+    return this._request('POST', `/zones/${zoneId}/firewall/access_rules/rules`, {
+      mode,
+      notes,
+      configuration: {
+        target,
+        value
+      }
+    });
+  }
+
+  deleteAccessRule(zoneId, ruleId) {
+    return this._request('DELETE', `/zones/${zoneId}/firewall/access_rules/rules/${ruleId}`);
+  }
+}
+
+function normalizeBlacklistSyncMode(mode) {
+  const value = String(mode || '').trim().toLowerCase();
+  if (['block', 'challenge', 'js_challenge', 'managed_challenge'].includes(value)) {
+    return value;
+  }
+  return 'block';
+}
+
+function getAccessRuleTarget(ip) {
+  const value = String(ip || '').trim();
+  if (!value) {
+    return null;
+  }
+  if (value.includes('/')) {
+    return 'ip_range';
+  }
+  if (value.includes(':')) {
+    return 'ip6';
+  }
+  return 'ip';
+}
+
+function buildBlacklistRuleNotes(prefix, ip) {
+  const notePrefix = String(prefix || 'SafeLine Risk IP').trim() || 'SafeLine Risk IP';
+  return `${notePrefix}: ${ip}`;
+}
+
+async function scanRedisKeys(redisClient, pattern, count = 200, maxItems = 5000) {
+  const keys = [];
+  let cursor = '0';
+
+  do {
+    const result = await redisClient.scan(cursor, 'MATCH', pattern, 'COUNT', count);
+    cursor = Array.isArray(result) ? String(result[0]) : '0';
+    const batch = Array.isArray(result && result[1]) ? result[1] : [];
+    for (const key of batch) {
+      keys.push(key);
+      if (keys.length >= maxItems) {
+        return keys;
+      }
+    }
+  } while (cursor !== '0');
+
+  return keys;
+}
+
+async function syncBlockedIpToCloudflare(redisClient, jwtSecret, action, ip, options = {}) {
+  const normalizedIp = String(ip || '').trim();
+  if (!normalizedIp) {
+    return { success: false, skipped: true, reason: 'invalid_ip' };
+  }
+
+  const cfgRaw = await redisClient.get('cf:config');
+  if (!cfgRaw) {
+    return { success: true, skipped: true, reason: 'cf_not_configured' };
+  }
+
+  const cfg = JSON.parse(cfgRaw);
+  if (cfg.blacklist_sync_enabled === false) {
+    return { success: true, skipped: true, reason: 'blacklist_sync_disabled' };
+  }
+  if (!cfg.api_token_enc || !Array.isArray(cfg.zone_ids) || cfg.zone_ids.length === 0) {
+    return { success: true, skipped: true, reason: 'cf_credentials_incomplete' };
+  }
+
+  const token = decryptToken(cfg.api_token_enc, jwtSecret);
+  if (!token) {
+    return { success: false, skipped: true, reason: 'token_decrypt_failed' };
+  }
+
+  const mode = normalizeBlacklistSyncMode(options.mode || cfg.blacklist_sync_mode);
+  const notes = buildBlacklistRuleNotes(cfg.blacklist_sync_notes_prefix, normalizedIp);
+  const target = getAccessRuleTarget(normalizedIp);
+  if (!target) {
+    return { success: false, skipped: true, reason: 'unsupported_target' };
+  }
+
+  const client = new CfApiClient(
+    token,
+    cfg.timeout_ms || 10000,
+    cfg.auth_type === 'global_key' ? 'global_key' : 'token',
+    cfg.auth_email || ''
+  );
+
+  const zoneIds = Array.from(new Set((cfg.zone_ids || []).map((zoneId) => String(zoneId || '').trim()).filter(Boolean)));
+  const details = [];
+
+  for (const zoneId of zoneIds) {
+    const mappingKey = `${CF_BLACKLIST_RULEMAP_PREFIX}${zoneId}`;
+    const existingRuleId = await redisClient.hget(mappingKey, normalizedIp);
+
+    if (action === 'add') {
+      if (existingRuleId) {
+        details.push({ zone: zoneId, ip: normalizedIp, action, changed: false, rule_id: existingRuleId });
+        continue;
+      }
+
+      try {
+        const created = await client.createAccessRule(zoneId, target, normalizedIp, mode, notes);
+        const ruleId = created && created.id ? created.id : null;
+        if (ruleId) {
+          await redisClient.hset(mappingKey, normalizedIp, ruleId);
+        }
+        details.push({ zone: zoneId, ip: normalizedIp, action, changed: true, rule_id: ruleId, mode });
+      } catch (error) {
+        details.push({ zone: zoneId, ip: normalizedIp, action, changed: false, error: error.message || String(error) });
+      }
+      continue;
+    }
+
+    if (!existingRuleId) {
+      details.push({ zone: zoneId, ip: normalizedIp, action, changed: false });
+      continue;
+    }
+
+    try {
+      await client.deleteAccessRule(zoneId, existingRuleId);
+    } catch (error) {
+      details.push({ zone: zoneId, ip: normalizedIp, action, changed: false, rule_id: existingRuleId, error: error.message || String(error) });
+      continue;
+    }
+
+    await redisClient.hdel(mappingKey, normalizedIp);
+    details.push({ zone: zoneId, ip: normalizedIp, action, changed: true, rule_id: existingRuleId });
+  }
+
+  return {
+    success: details.every((item) => !item.error),
+    skipped: false,
+    details
+  };
+}
+
+async function syncRiskBlacklistToCloudflare(redisClient, jwtSecret, cfg, client) {
+  if (!cfg || cfg.blacklist_sync_enabled === false) {
+    return { success: true, skipped: true, reason: 'blacklist_sync_disabled' };
+  }
+
+  const zoneIds = Array.from(new Set((cfg.zone_ids || []).map((zoneId) => String(zoneId || '').trim()).filter(Boolean)));
+  if (zoneIds.length === 0) {
+    return { success: true, skipped: true, reason: 'no_zones_configured' };
+  }
+
+  const blacklistKeys = await scanRedisKeys(redisClient, 'safeline:blacklist:*', 200, Number(cfg.blacklist_sync_max_entries) || 5000);
+  const desiredIps = blacklistKeys
+    .filter((key) => typeof key === 'string' && key.startsWith('safeline:blacklist:'))
+    .map((key) => key.slice('safeline:blacklist:'.length))
+    .filter(Boolean);
+  const desiredSet = new Set(desiredIps);
+
+  const mode = normalizeBlacklistSyncMode(cfg.blacklist_sync_mode);
+  const notesPrefix = cfg.blacklist_sync_notes_prefix;
+  const result = {
+    success: true,
+    skipped: false,
+    synced: desiredIps.length,
+    created: 0,
+    removed: 0,
+    errors: []
+  };
+
+  for (const zoneId of zoneIds) {
+    const mappingKey = `${CF_BLACKLIST_RULEMAP_PREFIX}${zoneId}`;
+    const currentMap = await redisClient.hgetall(mappingKey) || {};
+
+    for (const ip of desiredSet) {
+      if (currentMap[ip]) {
+        continue;
+      }
+
+      const target = getAccessRuleTarget(ip);
+      if (!target) {
+        continue;
+      }
+
+      try {
+        const created = await client.createAccessRule(zoneId, target, ip, mode, buildBlacklistRuleNotes(notesPrefix, ip));
+        const ruleId = created && created.id ? created.id : null;
+        if (ruleId) {
+          await redisClient.hset(mappingKey, ip, ruleId);
+        }
+        result.created += 1;
+      } catch (error) {
+        result.success = false;
+        result.errors.push({ zone: zoneId, ip, action: 'add', error: error.message || String(error) });
+      }
+    }
+
+    for (const [ip, ruleId] of Object.entries(currentMap)) {
+      if (desiredSet.has(ip)) {
+        continue;
+      }
+
+      try {
+        await client.deleteAccessRule(zoneId, ruleId);
+      } catch (error) {
+        result.success = false;
+        result.errors.push({ zone: zoneId, ip, action: 'remove', error: error.message || String(error) });
+        continue;
+      }
+
+      await redisClient.hdel(mappingKey, ip);
+      result.removed += 1;
+    }
+  }
+
+  return result;
 }
 
 async function applySecurityLevelToZones(client, zoneIds, targetLevel, options = {}) {
@@ -283,11 +516,13 @@ class CfShieldWorker {
     const cfgRaw = await redis.get('cf:config');
     if (!cfgRaw) return;
     const cfg = JSON.parse(cfgRaw);
-    if (!cfg.enabled) return;
     if (!cfg.api_token_enc || !cfg.zone_ids || cfg.zone_ids.length === 0) return;
 
     const token = decryptToken(cfg.api_token_enc, this.jwtSecret);
-    if (!token) return;
+    if (!token) {
+      console.warn('[CF] Failed to decrypt Cloudflare credentials; re-save API key in the control panel');
+      return;
+    }
 
     const activateThreshold   = Number(cfg.activate_threshold)   || 50;
     const deactivateThreshold = Number(cfg.deactivate_threshold) || 10;
@@ -316,6 +551,14 @@ class CfShieldWorker {
       cfg.auth_type === 'global_key' ? 'global_key' : 'token',
       cfg.auth_email || ''
     );
+
+    try {
+      await syncRiskBlacklistToCloudflare(redis, this.jwtSecret, cfg, client);
+    } catch (error) {
+      console.error('[CF] Risk IP sync error:', error.message || error);
+    }
+
+    if (!cfg.enabled) return;
 
     if (!state.active && score >= activateThreshold) {
       // ── ACTIVATE ────────────────────────────────────────────────────────
@@ -409,6 +652,8 @@ module.exports = {
   decryptToken,
   CfApiClient,
   applySecurityLevelToZones,
+  syncBlockedIpToCloudflare,
+  syncRiskBlacklistToCloudflare,
   CfShieldWorker,
   readAttackTelemetry,
   syncAttackTelemetry,
