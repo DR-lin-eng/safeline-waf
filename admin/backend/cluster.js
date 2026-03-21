@@ -120,6 +120,15 @@ class ClusterManager {
   }
 
   async getClusterStatus() {
+    if (!this.redisClient || !this.initialized) {
+      return {
+        total: 0,
+        online: 0,
+        offline: 0,
+        nodes: []
+      };
+    }
+
     const keys = await this.redisClient.keys('cluster:nodes:*');
     const nodes = [];
     const now = Date.now();
@@ -152,6 +161,10 @@ class ClusterManager {
   }
 
   async broadcastConfigReload() {
+    if (!this.redisClient || !this.pubClient || !this.initialized) {
+      return { version: null, broadcasted_at: Date.now(), skipped: true };
+    }
+
     const version = Date.now();
     await this.redisClient.set('cluster:config:version', version);
     await this.pubClient.publish('cluster:config:reload', JSON.stringify({
@@ -166,6 +179,9 @@ class ClusterManager {
   async syncBlacklist(entries) {
     if (!Array.isArray(entries)) {
       throw new Error('Entries must be an array');
+    }
+    if (!this.pubClient || !this.initialized) {
+      return { synced: 0, broadcasted_at: Date.now(), skipped: true };
     }
     await this.pubClient.publish('cluster:blacklist:sync', JSON.stringify({
       action:    'sync',
@@ -191,12 +207,19 @@ class ClusterManager {
   }
 
   async removeNode(nodeId) {
+    if (!this.redisClient || !this.initialized) {
+      return true;
+    }
     await this.redisClient.del(`cluster:nodes:${nodeId}`);
     console.log(`[Cluster] Node removed: ${nodeId}`);
     return true;
   }
 
   async cleanup() {
+    if (!this.redisClient || !this.initialized) {
+      return { removed: 0, checked: 0 };
+    }
+
     const now = Date.now();
     const maxAge = 5 * 60 * 1000;
     const keys = await this.redisClient.keys('cluster:nodes:*');
