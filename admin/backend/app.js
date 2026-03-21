@@ -1,7 +1,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const fs = require('fs').promises;
+const fsNative = require('fs');
+const fs = fsNative.promises;
 const path = require('path');
 const { execFile } = require('child_process');
 const axios = require('axios');
@@ -1045,27 +1046,80 @@ async function ensureNginxReadableFile(filePath, options = {}) {
   try {
     await fs.chmod(filePath, 0o644);
   } catch (error) {
+    try {
+      await fs.access(filePath, fsNative.constants.R_OK);
+      console.warn(`[TLS] chmod skipped for readable file ${filePath}: ${error.message}`);
+      return;
+    } catch (_) {
+      // Fall through to strict handling below.
+    }
+
     if (options && options.strict) {
       throw new Error(`Failed to set readable permissions on ${filePath}: ${error.message}`);
     }
   }
 }
 
+async function ensureManagedSelfSignedCertificate(domain, options = {}) {
+  const normalizedDomain = normalizeCertificateDomain(domain);
+  const managedTlsPaths = getDefaultTlsPaths(normalizedDomain);
+  const certHostPath = mapNginxCertPathToHostPath(managedTlsPaths.cert_path);
+  const keyHostPath = mapNginxCertPathToHostPath(managedTlsPaths.key_path);
+
+  if (!certHostPath || !keyHostPath) {
+    throw new Error(`TLS certificate paths must be under ${NGINX_CERT_DIR}`);
+  }
+
+  await fs.mkdir(path.dirname(certHostPath), { recursive: true });
+  await generateSelfSignedCert(normalizedDomain, certHostPath, keyHostPath, options);
+
+  await ensureNginxReadableFile(certHostPath, { strict: true });
+  await ensureNginxReadableFile(keyHostPath, { strict: true });
+
+  const certContent = await fs.readFile(certHostPath, 'utf8');
+  const keyContent = await fs.readFile(keyHostPath, 'utf8');
+  const validation = validateCertificateBundle(certContent, keyContent, normalizedDomain);
+
+  return {
+    cert_path: managedTlsPaths.cert_path,
+    key_path: managedTlsPaths.key_path,
+    cert_file_name: path.basename(certHostPath),
+    key_file_name: path.basename(keyHostPath),
+    validation: {
+      ...validation,
+      managed: true,
+      self_signed: true
+    }
+  };
+}
+
 async function snapshotFileState(filePath) {
   try {
     const stats = await fs.stat(filePath);
-    const content = await fs.readFile(filePath);
+    let content = null;
+    let unreadable = false;
+    try {
+      content = await fs.readFile(filePath);
+    } catch (error) {
+      if (error && (error.code === 'EACCES' || error.code === 'EPERM')) {
+        unreadable = true;
+      } else {
+        throw error;
+      }
+    }
     return {
       exists: true,
       mode: stats.mode & 0o777,
-      content
+      content,
+      unreadable
     };
   } catch (error) {
     if (error && error.code === 'ENOENT') {
       return {
         exists: false,
         mode: null,
-        content: null
+        content: null,
+        unreadable: false
       };
     }
     throw error;
@@ -1074,6 +1128,9 @@ async function snapshotFileState(filePath) {
 
 async function restoreFileState(filePath, snapshot) {
   if (snapshot && snapshot.exists) {
+    if (snapshot.unreadable) {
+      return;
+    }
     await writeFileAtomic(filePath, snapshot.content);
     if (snapshot.mode) {
       await fs.chmod(filePath, snapshot.mode);
@@ -3233,53 +3290,26 @@ apiRouter.post('/certificates/upload', (req, res) => {
     }
 
     try {
-      const certFile = req.files && req.files.cert_file && req.files.cert_file[0];
-      const keyFile = req.files && req.files.key_file && req.files.key_file[0];
       const domain = normalizeCertificateDomain(req.body.domain);
-
-      if (!certFile || !keyFile) {
-        return sendError(res, 400, 'cert_file and key_file are required');
-      }
-
-      const certContent = ensurePemLikeContent(certFile.buffer.toString('utf8'), 'Certificate');
-      const keyContent = ensurePemLikeContent(keyFile.buffer.toString('utf8'), 'Private key');
-      const validation = validateCertificateBundle(certContent, keyContent, domain);
-
-      const names = resolveCertFilenames(req.body || {}, domain);
-      const certHostPath = path.join(CERTS_DIR, names.cert_file_name);
-      const keyHostPath = path.join(CERTS_DIR, names.key_file_name);
       const tlsTransaction = createTlsTransaction();
 
       try {
-        await writeCertificatePairAtomic(
-          certHostPath,
-          certContent,
-          keyHostPath,
-          keyContent,
-          { transaction: tlsTransaction }
-        );
+        const prepared = await ensureManagedSelfSignedCertificate(domain, { transaction: tlsTransaction });
+        return res.json({
+          success: true,
+          message: 'Self-signed origin certificate prepared successfully',
+          data: prepared
+        });
       } catch (writeError) {
         const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
         return res.status(500).json({
           code: 500,
-          message: writeError.message || 'Failed to store certificate files',
+          message: writeError.message || 'Failed to prepare self-signed certificate files',
           rollback: tlsRollback || undefined
         });
       }
-
-      res.json({
-        success: true,
-        message: 'Certificate files uploaded and validated successfully',
-        data: {
-          cert_path: `${NGINX_CERT_DIR}/${names.cert_file_name}`,
-          key_path: `${NGINX_CERT_DIR}/${names.key_file_name}`,
-          cert_file_name: names.cert_file_name,
-          key_file_name: names.key_file_name,
-          validation
-        }
-      });
     } catch (error) {
-      return sendError(res, 400, error.message || 'Failed to upload certificate files');
+      return sendError(res, 400, error.message || 'Failed to prepare self-signed certificate files');
     }
   });
 });
@@ -3287,45 +3317,25 @@ apiRouter.post('/certificates/upload', (req, res) => {
 apiRouter.post('/certificates/content', async (req, res) => {
   try {
     const domain = normalizeCertificateDomain(req.body.domain);
-    const names = resolveCertFilenames(req.body || {}, domain);
-    const certContent = ensurePemLikeContent(req.body.cert_content, 'Certificate');
-    const keyContent = ensurePemLikeContent(req.body.key_content, 'Private key');
-    const validation = validateCertificateBundle(certContent, keyContent, domain);
-
-    const certHostPath = path.join(CERTS_DIR, names.cert_file_name);
-    const keyHostPath = path.join(CERTS_DIR, names.key_file_name);
     const tlsTransaction = createTlsTransaction();
 
     try {
-      await writeCertificatePairAtomic(
-        certHostPath,
-        certContent,
-        keyHostPath,
-        keyContent,
-        { transaction: tlsTransaction }
-      );
+      const prepared = await ensureManagedSelfSignedCertificate(domain, { transaction: tlsTransaction });
+      return res.json({
+        success: true,
+        message: 'Self-signed origin certificate prepared successfully',
+        data: prepared
+      });
     } catch (writeError) {
       const tlsRollback = buildTlsRollbackPayload(await rollbackTlsTransaction(tlsTransaction));
       return res.status(500).json({
         code: 500,
-        message: writeError.message || 'Failed to store certificate content',
+        message: writeError.message || 'Failed to prepare self-signed certificate content',
         rollback: tlsRollback || undefined
       });
     }
-
-    res.json({
-      success: true,
-      message: 'Certificate content uploaded and validated successfully',
-      data: {
-        cert_path: `${NGINX_CERT_DIR}/${names.cert_file_name}`,
-        key_path: `${NGINX_CERT_DIR}/${names.key_file_name}`,
-        cert_file_name: names.cert_file_name,
-        key_file_name: names.key_file_name,
-        validation
-      }
-    });
   } catch (error) {
-    return sendError(res, 400, error.message || 'Invalid certificate content');
+    return sendError(res, 400, error.message || 'Failed to prepare self-signed certificate content');
   }
 });
 

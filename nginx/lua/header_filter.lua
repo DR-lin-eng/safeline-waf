@@ -10,8 +10,16 @@ ngx.header["Permissions-Policy"] =
 
 -- X-XSS-Protection 已被现代浏览器废弃，CSP 更有效，不再设置
 
--- 仅当上游未设置 CSP 时才注入默认策略（避免破坏应用的精细化CSP）
-if not ngx.header["Content-Security-Policy"] then
+local uri = ngx.var.uri or ""
+local is_waf_managed_page = uri == "/pow"
+    or uri:sub(1, 5) == "/pow/"
+    or uri:sub(1, 18) == "/safeline-static/"
+    or uri:sub(1, 14) == "/safeline-api/"
+
+-- 仅对 WAF 自己输出的验证/静态页面兜底注入默认 CSP。
+-- 代理后的业务页面即使开启了 JS 加密/F12 防护，也不要强行覆盖 CSP，
+-- 否则会拦截业务站点依赖的外链 CSS/JS。
+if not ngx.header["Content-Security-Policy"] and is_waf_managed_page then
     local script_src = "script-src 'self'; "
     if ngx.ctx.js_encryption or ngx.ctx.prevent_f12 then
         script_src = "script-src 'self' 'unsafe-inline'; "
