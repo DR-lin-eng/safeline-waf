@@ -1,7 +1,8 @@
 local cjson = require "cjson"
 local config_dict = ngx.shared.safeline_config
 local blacklist_bloom = require "blacklist_bloom"
-local cluster_subscribers_started = false
+local config_reload_subscriber_started = false
+local blacklist_subscriber_started = false
 local ml_runtime_started = false
 
 -- 启动 Bloom filter 定时刷新
@@ -53,13 +54,13 @@ if ngx.worker.id() == 0 then
         return ok_cluster and type(cluster) == "table" and cluster.enabled == true
     end
 
-    local function ensure_cluster_subscribers_started()
-        if cluster_subscribers_started or not cluster_runtime_enabled() then
+    local function ensure_config_reload_subscriber_started()
+        if config_reload_subscriber_started or not cluster_runtime_enabled() then
             return
         end
 
-        cluster_subscribers_started = true
-        ngx.log(ngx.NOTICE, "[Cluster] Starting Pub/Sub subscribers")
+        config_reload_subscriber_started = true
+        ngx.log(ngx.NOTICE, "[Cluster] Starting config reload subscriber")
 
         -- Subscribe to config reload events
         local config_loader = require "config_loader"
@@ -71,7 +72,16 @@ if ngx.worker.id() == 0 then
             end
         end)
 
-        -- Subscribe to blacklist sync events
+    end
+
+    local function ensure_blacklist_subscriber_started()
+        if blacklist_subscriber_started then
+            return
+        end
+
+        blacklist_subscriber_started = true
+        ngx.log(ngx.NOTICE, "[Cluster] Starting blacklist sync subscriber")
+
         local ip_blacklist = require "ip_blacklist"
         ngx.timer.at(0, function(premature)
             if premature then return end
@@ -82,12 +92,14 @@ if ngx.worker.id() == 0 then
         end)
     end
 
-    ensure_cluster_subscribers_started()
+    ensure_config_reload_subscriber_started()
+    ensure_blacklist_subscriber_started()
 
     local function schedule_cluster_runtime_watch()
         local ok_t, t_err = ngx.timer.at(5, function(premature)
             if premature then return end
-            ensure_cluster_subscribers_started()
+            ensure_config_reload_subscriber_started()
+            ensure_blacklist_subscriber_started()
             schedule_cluster_runtime_watch()
         end)
         if not ok_t then

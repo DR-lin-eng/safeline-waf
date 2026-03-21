@@ -170,6 +170,33 @@ function loadScript(src) {
   });
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function hexToRgb(hex) {
+  const normalized = String(hex || '').replace('#', '');
+  if (normalized.length !== 6) {
+    return [255, 255, 255];
+  }
+  return [
+    parseInt(normalized.slice(0, 2), 16),
+    parseInt(normalized.slice(2, 4), 16),
+    parseInt(normalized.slice(4, 6), 16),
+  ];
+}
+
+function rgbToHex([r, g, b]) {
+  return `#${[r, g, b].map((item) => clamp(Math.round(item), 0, 255).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function mixColor(startHex, endHex, ratio) {
+  const start = hexToRgb(startHex);
+  const end = hexToRgb(endHex);
+  const t = clamp(ratio, 0, 1);
+  return rgbToHex(start.map((item, index) => item + (end[index] - item) * t));
+}
+
 export default {
   name: 'AttackMap',
   data() {
@@ -277,6 +304,15 @@ export default {
         window.addEventListener('resize', this.resizeChart);
       }
 
+      const countryCountMap = new Map();
+      this.points.forEach((point) => {
+        const country = point && point.country ? String(point.country) : '';
+        if (!country || country === 'Unknown') {
+          return;
+        }
+        countryCountMap.set(country, (countryCountMap.get(country) || 0) + (Number(point.count) || 0));
+      });
+
       // Build scatter data
       const scatterData = this.points.map(p => ({
         name: `${p.ip}\n${p.country}${p.city ? ', ' + p.city : ''}\n攻击 ${p.count} 次`,
@@ -296,12 +332,48 @@ export default {
 
       // Max count for bubble scaling
       const maxCount = this.points.reduce((m, p) => Math.max(m, p.count), 1);
+      const maxCountryCount = Array.from(countryCountMap.values()).reduce((m, count) => Math.max(m, count), 1);
+      const countryRegions = Array.from(countryCountMap.entries()).map(([country, count]) => {
+        const heat = count / maxCountryCount;
+        return {
+          name: country,
+          itemStyle: {
+            areaColor: mixColor('#18324d', '#ff5b4d', heat),
+            borderColor: heat > 0.7 ? '#ffd166' : '#294e78',
+            borderWidth: heat > 0.7 ? 1.2 : 0.7
+          },
+          emphasis: {
+            itemStyle: {
+              areaColor: mixColor('#244566', '#ff8369', Math.min(1, heat + 0.15))
+            }
+          }
+        };
+      });
 
       const option = {
         backgroundColor: '#0d1117',
+        title: {
+          text: '全球攻击来源热力与入站路径',
+          left: 18,
+          top: 14,
+          textStyle: {
+            color: '#e5edf7',
+            fontSize: 16,
+            fontWeight: 700
+          },
+          subtext: `来源国家 ${countryCountMap.size} · 攻击源 ${this.points.length} · 最近更新 ${this.lastUpdated || '-'}`,
+          subtextStyle: {
+            color: '#89a3bf',
+            fontSize: 11
+          }
+        },
         tooltip: {
           trigger: 'item',
           formatter: (params) => {
+            if (params.componentSubType === 'map') {
+              const value = Number(params.value || 0);
+              return `<b>${params.name}</b><br/>攻击次数: <b>${value}</b>`;
+            }
             if (params.seriesType === 'effectScatter' || params.seriesType === 'scatter') {
               const [,, count] = params.value;
               return `<b>${params.data.ip}</b><br/>${params.data.country}<br/>攻击次数: <b>${count}</b>`;
@@ -315,6 +387,7 @@ export default {
           zoom: 1.2,
           center: [10, 20],
           label: { show: false },
+          regions: countryRegions,
           itemStyle: {
             areaColor: '#12263f',
             borderColor: '#1e3a5f',
@@ -326,6 +399,19 @@ export default {
           },
         },
         series: [
+          {
+            name: '国家热度',
+            type: 'map',
+            map: 'world',
+            roam: false,
+            silent: true,
+            geoIndex: 0,
+            emphasis: { disabled: true },
+            data: Array.from(countryCountMap.entries()).map(([country, count]) => ({
+              name: country,
+              value: count
+            }))
+          },
           // Flight lines
           {
             name: '攻击路径',
@@ -334,17 +420,17 @@ export default {
             zlevel: 1,
             effect: {
               show: true,
-              period: 4,
-              trailLength: 0.3,
+              period: 4.5,
+              trailLength: 0.22,
               symbol: 'arrow',
               symbolSize: 5,
               color: '#ff4d4f',
             },
             lineStyle: {
               color: '#ff6b6b',
-              width: 0,
-              curveness: 0.2,
-              opacity: 0,
+              width: 1,
+              curveness: 0.28,
+              opacity: 0.22,
             },
             data: linesData,
           },
@@ -356,7 +442,7 @@ export default {
             zlevel: 2,
             rippleEffect: {
               brushType: 'stroke',
-              scale: 3,
+              scale: 4,
               period: 3,
             },
             symbolSize: (val) => {
@@ -371,6 +457,8 @@ export default {
                 return '#fadb14';
               },
               opacity: 0.85,
+              shadowBlur: 18,
+              shadowColor: 'rgba(255, 107, 107, 0.45)',
             },
             data: scatterData,
             tooltip: { show: true },
@@ -383,7 +471,11 @@ export default {
             zlevel: 3,
             symbol: 'pin',
             symbolSize: 20,
-            itemStyle: { color: '#52c41a' },
+            itemStyle: {
+              color: '#52c41a',
+              shadowBlur: 14,
+              shadowColor: 'rgba(82,196,26,0.45)'
+            },
             data: [{ name: '服务器', value: [...SERVER_LOC, 0] }],
             tooltip: { formatter: '服务器位置' },
           },

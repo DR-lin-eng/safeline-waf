@@ -321,6 +321,28 @@ local function get_request_scope_context()
     }
 end
 
+local function is_challenge_whitelisted(site_config, uri)
+    if type(site_config) ~= "table" or type(uri) ~= "string" or uri == "" then
+        return false
+    end
+
+    local paths = site_config.challenge_whitelist_paths
+    if type(paths) ~= "table" then
+        return false
+    end
+
+    for _, raw_path in ipairs(paths) do
+        local path = type(raw_path) == "string" and raw_path or nil
+        if path and path ~= "" then
+            if uri == path or uri:sub(1, #path) == path then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function matches_request_scope(verified_token, request_ctx)
     if type(verified_token) ~= "table" or type(request_ctx) ~= "table" then
         return false
@@ -1168,7 +1190,7 @@ local function redirect_to_verification(site_config, verification_type, reason, 
     local token = utils.encrypt_token(token_data)
     local redirect_url = nil
     if verification_type == "pow" then
-        redirect_url = "/pow"
+        redirect_url = "/pow?token=" .. ngx.escape_uri(token)
     else
         redirect_url = "/safeline-static/verify.html?token=" .. ngx.escape_uri(token)
     end
@@ -1307,6 +1329,47 @@ end
 local function process_waf()
     local uri = ngx.var.uri
 
+    local method = ngx.req.get_method()
+
+    -- Browser extensions sometimes probe pages with pseudo paths like
+    -- /chrome-extension:/... . These are not real application requests and
+    -- should not participate in scoring / blacklisting.
+    if type(uri) == "string" and ngx.re.find(uri, [[^/[a-z]+-extension:]], "jo") then
+        ngx.status = ngx.HTTP_NOT_FOUND
+        return ngx.exit(ngx.HTTP_NOT_FOUND)
+    end
+
+    -- Frontend bundles and site metadata must not be challenged, otherwise a
+    -- single protected asset request turns the whole page into HTML/PoW and
+    -- breaks strict MIME loading in modern browsers.
+    if (method == "GET" or method == "HEAD") and type(uri) == "string" then
+        local is_frontend_asset = uri:match("^/assets/")
+            or uri == "/favicon.ico"
+            or uri == "/manifest.json"
+            or uri == "/site.webmanifest"
+            or uri:match("^/apple%-touch%-icon")
+            or uri:match("^/favicon%-")
+            or uri:match("%.css$")
+            or uri:match("%.js$")
+            or uri:match("%.mjs$")
+            or uri:match("%.map$")
+            or uri:match("%.png$")
+            or uri:match("%.jpg$")
+            or uri:match("%.jpeg$")
+            or uri:match("%.gif$")
+            or uri:match("%.svg$")
+            or uri:match("%.ico$")
+            or uri:match("%.webp$")
+            or uri:match("%.avif$")
+            or uri:match("%.woff2?$")
+            or uri:match("%.ttf$")
+            or uri:match("%.otf$")
+
+        if is_frontend_asset then
+            return
+        end
+    end
+
     -- 检查是否是静态资源/验证API/POW验证页面
     if uri:match("^/safeline%-static/") or uri:match("^/safeline%-api/") or uri == "/pow" or uri:match("^/pow/") then
         return
@@ -1328,9 +1391,12 @@ local function process_waf()
         -- 如果没有找到站点配置，允许请求通过
         return
     end
+
+    if is_challenge_whitelisted(site_config, uri) then
+        return
+    end
     
     -- 请求信息
-    local method = ngx.req.get_method()
     local adaptive_cfg = get_global_config("adaptive_protection", {})
     local skip_deep_checks = false
 
@@ -1494,7 +1560,7 @@ local function process_waf()
 
     -- 检查LLM审计缓存裁决（快速路径，非阻塞）
     if site_config.llm_audit_enabled ~= false then
-        local llm_action = llm_auditor.apply_verdict(client_ip)
+        local llm_action = llm_auditor.apply_verdict(client_ip, ngx.var.host or "", uri)
         if llm_action == "ban" then
             local reason = "llm_verdict_ban"
             local inspection_summary = normalize_inspection_summary({

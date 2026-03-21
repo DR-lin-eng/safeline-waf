@@ -848,7 +848,10 @@ function _M.analyze_traffic_pattern(client_ip)
     end
     
     -- 5. 检查请求间隔异常
-    if stats.interval_statistics.mean < 1.0 and stats.interval_statistics.std_dev < 0.5 then
+    local interval_stats = type(stats.interval_statistics) == "table" and stats.interval_statistics or {}
+    local mean = tonumber(interval_stats.mean)
+    local std_dev = tonumber(interval_stats.std_dev)
+    if mean and std_dev and mean < 1.0 and std_dev < 0.5 then
         score = score + 3
     end
     

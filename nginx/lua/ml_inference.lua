@@ -424,58 +424,58 @@ function _M.subscribe_model_reload()
     while true do
         local red = redis_lib:new()
         red:set_timeout(30000)  -- 30s read timeout for blocking subscribe
+        local reconnect_delay = 1
 
         local ok, err = red:connect(settings.host, settings.port)
         if not ok then
             ngx.log(ngx.WARN, "[ML] Pub/Sub connect failed: ", err, " – retry in 5s")
-            ngx.sleep(5)
-            goto continue
-        end
-
-        if settings.password and settings.password ~= "" then
-            local auth_ok, auth_err = red:auth(settings.password)
-            if not auth_ok then
-                ngx.log(ngx.ERR, "[ML] Pub/Sub auth failed: ", auth_err)
-                red:close()
-                ngx.sleep(5)
-                goto continue
-            end
-        end
-
-        local sub_ok, sub_err = red:subscribe("ml:model:reload")
-        if not sub_ok then
-            ngx.log(ngx.ERR, "[ML] Subscribe failed: ", sub_err)
-            red:close()
-            ngx.sleep(5)
-            goto continue
-        end
-
-        ngx.log(ngx.NOTICE, "[ML] Pub/Sub subscriber ready on ml:model:reload")
-
-        while true do
-            local res, rerr = red:read_reply()
-            if not res then
-                if rerr ~= "timeout" then
-                    ngx.log(ngx.WARN, "[ML] Pub/Sub read error: ", rerr, " – reconnecting")
-                    break
+            reconnect_delay = 5
+        else
+            if settings.password and settings.password ~= "" then
+                local auth_ok, auth_err = red:auth(settings.password)
+                if not auth_ok then
+                    ngx.log(ngx.ERR, "[ML] Pub/Sub auth failed: ", auth_err)
+                    red:close()
+                    reconnect_delay = 5
                 end
-                -- timeout is fine – just a keepalive gap
-            else
-                if type(res) == "table" and res[1] == "message" then
-                    local ok_l, lerr = pcall(_M.load_model)
-                    if not ok_l then
-                        ngx.log(ngx.ERR, "[ML] Hot reload failed: ", lerr)
-                    else
-                        ngx.log(ngx.NOTICE, "[ML] Model hot-reloaded via Pub/Sub")
+            end
+
+            if reconnect_delay == 1 then
+                local sub_ok, sub_err = red:subscribe("ml:model:reload")
+                if not sub_ok then
+                    ngx.log(ngx.ERR, "[ML] Subscribe failed: ", sub_err)
+                    red:close()
+                    reconnect_delay = 5
+                else
+                    ngx.log(ngx.NOTICE, "[ML] Pub/Sub subscriber ready on ml:model:reload")
+
+                    while true do
+                        local res, rerr = red:read_reply()
+                        if not res then
+                            if rerr ~= "timeout" then
+                                ngx.log(ngx.WARN, "[ML] Pub/Sub read error: ", rerr, " – reconnecting")
+                                break
+                            end
+                            -- timeout is fine – just a keepalive gap
+                        else
+                            if type(res) == "table" and res[1] == "message" then
+                                local ok_l, lerr = pcall(_M.load_model)
+                                if not ok_l then
+                                    ngx.log(ngx.ERR, "[ML] Hot reload failed: ", lerr)
+                                else
+                                    ngx.log(ngx.NOTICE, "[ML] Model hot-reloaded via Pub/Sub")
+                                end
+                            end
+                        end
+                        ngx.sleep(0.05)
                     end
+
+                    red:close()
                 end
             end
-            ngx.sleep(0.05)
         end
 
-        red:close()
-        ::continue::
-        ngx.sleep(1)
+        ngx.sleep(reconnect_delay)
     end
 end
 

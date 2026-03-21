@@ -9,6 +9,32 @@ local pow = require "pow"
 local cache_dict = ngx.shared.safeline_cache
 local limit_dict = ngx.shared.safeline_limit
 
+local function read_request_body_json()
+    ngx.req.read_body()
+    local body = ngx.req.get_body_data()
+    if not body then
+        local body_file = ngx.req.get_body_file()
+        if body_file then
+            local f = io.open(body_file, "rb")
+            if f then
+                body = f:read("*a")
+                f:close()
+            end
+        end
+    end
+
+    if type(body) ~= "string" or body == "" then
+        return nil
+    end
+
+    local ok, data = pcall(cjson.decode, body)
+    if ok and type(data) == "table" then
+        return data
+    end
+
+    return nil
+end
+
 local function build_cookie_attributes(original_url)
     local attrs = {
         "Path=/",
@@ -569,10 +595,10 @@ local function handle_captcha_api()
 
     -- 处理POW验证请求
     elseif uri == "/safeline-api/pow/verify" or uri == "/pow/verify" then
-        ngx.req.read_body()
+        local body_json = read_request_body_json()
         local args = ngx.req.get_post_args() or {}
 
-        local token = args.token or ngx.var.cookie_safeline_verification or ngx.var.arg_token
+        local token = (body_json and body_json.token) or args.token or ngx.var.cookie_safeline_verification or ngx.var.arg_token
         if not token then
             ngx.status = ngx.HTTP_BAD_REQUEST
             ngx.say(cjson.encode({ success = false, message = "Missing token" }))

@@ -148,6 +148,35 @@ function _M.get_cached_verdict(client_ip)
     return ok and v or nil
 end
 
+local function is_non_page_path(uri)
+    if type(uri) ~= "string" or uri == "" then
+        return false
+    end
+
+    return uri:match("^/api/")
+        or uri:match("^/assets/")
+        or uri == "/favicon.ico"
+        or uri == "/manifest.json"
+        or uri == "/site.webmanifest"
+        or uri:match("^/apple%-touch%-icon")
+        or uri:match("^/[a-z]+%-extension:")
+        or uri:match("%.css$")
+        or uri:match("%.js$")
+        or uri:match("%.mjs$")
+        or uri:match("%.map$")
+        or uri:match("%.png$")
+        or uri:match("%.jpg$")
+        or uri:match("%.jpeg$")
+        or uri:match("%.gif$")
+        or uri:match("%.svg$")
+        or uri:match("%.ico$")
+        or uri:match("%.webp$")
+        or uri:match("%.avif$")
+        or uri:match("%.woff2?$")
+        or uri:match("%.ttf$")
+        or uri:match("%.otf$")
+end
+
 -- ── Queue request for LLM review ─────────────────────────────────────────
 
 -- trigger_reason: human-readable string that explains why this was flagged
@@ -229,9 +258,19 @@ end
 --   "challenge" → trigger CAPTCHA/POW
 --   "log"       → allow but log
 --   nil         → no verdict, continue normally
-function _M.apply_verdict(client_ip)
+function _M.apply_verdict(client_ip, host, uri)
     local v = _M.get_cached_verdict(client_ip)
     if not v then return nil end
+
+    local request_host = type(host) == "string" and host:lower() or ""
+    local verdict_host = type(v.host) == "string" and v.host:lower() or ""
+    if verdict_host ~= "" and request_host ~= "" and verdict_host ~= request_host then
+        return nil
+    end
+
+    if is_non_page_path(v.uri) then
+        return "log"
+    end
 
     -- Only act on high-confidence verdicts
     local confidence = tonumber(v.confidence) or 0

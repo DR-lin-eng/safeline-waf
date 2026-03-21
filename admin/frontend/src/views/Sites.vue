@@ -659,7 +659,8 @@ export default {
           stats_sample_rate: 0.01,
           global_hard_drop_enabled: adaptiveDefaults.hard_drop_on_overload === true,
           verified_scrubbing_rps: Number.isFinite(defaultVerifiedScrubbingRps) ? defaultVerifiedScrubbingRps : 20,
-          origin_proxy_only_enabled: antiBypassDefaults.origin_proxy_only_default === true
+          origin_proxy_only_enabled: antiBypassDefaults.origin_proxy_only_default === true,
+          challenge_whitelist_paths: []
         },
         verification_methods: {
           captcha_enabled: true,

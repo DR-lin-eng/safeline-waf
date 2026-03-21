@@ -134,6 +134,18 @@
             <input :id="id('max-forwarded-hops')" v-model.number="site.protection.max_forwarded_hops" type="number" class="form-control" min="4" max="64">
           </div>
         </div>
+        <div class="form-group">
+          <label :for="id('challenge-whitelist-paths')">挑战白名单路径</label>
+          <textarea
+            :id="id('challenge-whitelist-paths')"
+            class="form-control"
+            rows="4"
+            :value="challengeWhitelistText"
+            placeholder="/api/v1/&#10;/api/v1/ws/server&#10;/assets/"
+            @input="updateChallengeWhitelistPaths($event.target.value)"
+          ></textarea>
+          <small class="form-text text-muted">每行一个以 <code>/</code> 开头的路径前缀。命中这些路径时，WAF 不再触发验证跳转，适合前端 API、WebSocket 和必须直出的资源路径。</small>
+        </div>
       </div>
     </div>
 
@@ -228,11 +240,27 @@ export default {
       return this.compact
         ? '默认防护已启用，可直接跳过，创建完成后再细调。'
         : '编辑模式下可按需调整所有防护开关。';
+    },
+    challengeWhitelistText() {
+      const paths = this.site && this.site.protection && Array.isArray(this.site.protection.challenge_whitelist_paths)
+        ? this.site.protection.challenge_whitelist_paths
+        : [];
+      return paths.join('\n');
     }
   },
   methods: {
     id(suffix) {
       return `${this.idPrefix}-${suffix}`;
+    },
+    updateChallengeWhitelistPaths(value) {
+      if (!this.site.protection) {
+        return;
+      }
+
+      this.site.protection.challenge_whitelist_paths = String(value || '')
+        .split('\n')
+        .map((item) => item.trim())
+        .filter((item) => item.startsWith('/'));
     }
   }
 };
